@@ -27,10 +27,11 @@ pub struct DistrictRow {
     pub max_other_crossed: usize,
     pub violating_pair_fraction: f64,
     pub pairs_tested: usize,
-    /// Longest run (km) through the second-deepest other district over the
-    /// segments checked; the line rule fails at or above `min_cross_m`.
+    /// How far (km) the worst segment reaches into the second-deepest other
+    /// district it crosses; the line rule fails at or above `min_cross_m`.
     pub second_crossing_km: f64,
-    /// Districts crossed by the worst confirmed segment, e.g. "MD-2 12.3km; MD-7 1.1km".
+    /// Districts crossed by the worst confirmed segment and how deep it
+    /// reaches into each, e.g. "MD-2 12.3km deep; MD-7 1.1km deep".
     pub witness_crossed: String,
     pub witness_from_lon: Option<f64>,
     pub witness_from_lat: Option<f64>,
@@ -120,7 +121,7 @@ pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], p
             pairs_tested: l.map_or(0, |l| l.pairs_tested),
             second_crossing_km: l.map_or(0.0, |l| l.second_crossing_m / 1000.0),
             witness_crossed: w.map_or(String::new(), |w| {
-                w.crossed.iter().map(|c| format!("{} {:.1}km", district_label(&c.geoid), c.length_m / 1000.0)).collect::<Vec<_>>().join("; ")
+                w.crossed.iter().map(|c| format!("{} {:.1}km deep", district_label(&c.geoid), c.depth_m / 1000.0)).collect::<Vec<_>>().join("; ")
             }),
             witness_from_lon: w.map(|w| w.from[0]),
             witness_from_lat: w.map(|w| w.from[1]),
@@ -181,4 +182,74 @@ pub fn read(out_dir: &Path, congress: u32) -> Result<Scorecard> {
     let path = out_dir.join(format!("scorecard_cd{congress}.json"));
     let text = std::fs::read_to_string(&path).map_err(|e| anyhow!("{}: {e} (run `score --congress {congress}` first)", path.display()))?;
     Ok(serde_json::from_str(&text)?)
+}
+
+#[derive(Debug, Serialize)]
+pub struct CountyLineRow {
+    pub geoid: String,
+    pub name: String,
+    pub state: String,
+    pub line_pass: bool,
+    pub max_other_crossed: usize,
+    pub second_crossing_km: f64,
+    /// Counties crossed by the worst confirmed segment.
+    pub witness_crossed: String,
+    pub witness_from_lon: Option<f64>,
+    pub witness_from_lat: Option<f64>,
+    pub witness_to_lon: Option<f64>,
+    pub witness_to_lat: Option<f64>,
+}
+
+/// Applies the line rule to every county, treating the other counties of
+/// the same state as the "other districts". A baseline for how strict the
+/// rule is on boundaries nobody drew for partisan reasons.
+pub fn county_line_rule(data: &Path, out_dir: &Path, params: &Params) -> Result<std::path::PathBuf> {
+    let counties = load::load_counties(&crate::fetch::county_source(data))?;
+    // County names come from a relationship table; both use 2020 counties.
+    let (_, rel) = crate::fetch::district_sources(data, 119)?;
+    let names: HashMap<String, String> =
+        load::load_county_parts(&rel)?.into_iter().map(|p| (p.county, p.county_name)).collect();
+    let name = |g: &str| names.get(g).cloned().unwrap_or_else(|| g.to_string());
+
+    let states = load::by_state(&counties);
+    let mut list: Vec<(&String, &Vec<&Feature>)> = states.iter().collect();
+    list.sort_by_key(|(_, cs)| std::cmp::Reverse(cs.len()));
+    let results: Vec<(String, LineResult)> = list
+        .par_iter()
+        .flat_map(|(_, cs)| line_rule::score_state(cs, params))
+        .collect();
+
+    let mut rows: Vec<CountyLineRow> = results
+        .into_iter()
+        .map(|(g, l)| {
+            let w = l.witness.as_ref();
+            CountyLineRow {
+                name: name(&g),
+                state: state_abbr(&g[..2]).unwrap_or("??").to_string(),
+                line_pass: l.pass,
+                max_other_crossed: l.max_other_crossed,
+                second_crossing_km: l.second_crossing_m / 1000.0,
+                witness_crossed: w.map_or(String::new(), |w| {
+                    w.crossed.iter().map(|c| format!("{} {:.1}km deep", name(&c.geoid), c.depth_m / 1000.0)).collect::<Vec<_>>().join("; ")
+                }),
+                witness_from_lon: w.map(|w| w.from[0]),
+                witness_from_lat: w.map(|w| w.from[1]),
+                witness_to_lon: w.map(|w| w.to[0]),
+                witness_to_lat: w.map(|w| w.to[1]),
+                geoid: g,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.geoid.cmp(&b.geoid));
+
+    std::fs::create_dir_all(out_dir)?;
+    let path = out_dir.join("county_line_rule.csv");
+    let mut w = csv::Writer::from_path(&path)?;
+    for r in &rows {
+        w.serialize(r)?;
+    }
+    w.flush()?;
+    let fails = rows.iter().filter(|r| !r.line_pass).count();
+    eprintln!("{} counties | line rule fail {fails}", rows.len());
+    Ok(path)
 }

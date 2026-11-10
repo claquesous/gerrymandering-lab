@@ -164,6 +164,22 @@ fn rows_json(card: &Scorecard) -> Value {
     })
 }
 
+/// Second-crossing depths (km) from `counties`, if it has been run, for the
+/// county baseline on the tolerance chart.
+fn county_depths(out: &Path) -> Result<Option<Vec<f64>>> {
+    let path = out.join("county_line_rule.csv");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut rdr = csv::Reader::from_path(path)?;
+    let col = rdr.headers()?.iter().position(|h| h == "second_crossing_km").ok_or_else(|| anyhow::anyhow!("county_line_rule.csv: no second_crossing_km column"))?;
+    let mut v = Vec::new();
+    for row in rdr.records() {
+        v.push((row?[col].parse::<f64>()? * 1000.0).round() / 1000.0);
+    }
+    Ok(Some(v))
+}
+
 pub fn build(data: &Path, out: &Path) -> Result<PathBuf> {
     let cards: Vec<Scorecard> = [119, 118].into_iter().filter_map(|c| scorecard::read(out, c).ok()).collect();
     if cards.is_empty() {
@@ -197,7 +213,10 @@ pub fn build(data: &Path, out: &Path) -> Result<PathBuf> {
         states.insert(abbr, section);
     }
 
-    let data_json = json!({ "cards": cards.iter().map(rows_json).collect::<Vec<_>>() });
+    let data_json = json!({
+        "cards": cards.iter().map(rows_json).collect::<Vec<_>>(),
+        "county_depths": county_depths(out)?,
+    });
     let html = TEMPLATE
         .replace("__DATA__", &data_json.to_string().replace("</", "<\\/"))
         .replace("__STATES__", &states.into_values().collect::<String>());

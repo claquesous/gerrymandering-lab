@@ -7,16 +7,22 @@
 //! 1. Search: sample points on the district's boundary (including its convex
 //!    hull, where violations tend to be) and in its interior. Walk every pair
 //!    through a raster of the state and note which other districts the
-//!    segment runs through for at least `min_cross_m`.
+//!    segment may reach at least `min_cross_m` into.
 //! 2. Confirm: re-check the worst candidates, plus an even spread of the
 //!    rest, by clipping the segment against the real polygons. Only confirmed
 //!    crossings decide pass/fail. The confirmed share of the sample scales
 //!    the violating-pair fraction.
+//!
+//! A crossing is measured by its *depth*: how far the segment gets from the
+//! other district's border while inside it. Length would be wrong: a line
+//! between two points on one straight-looking border can run for kilometers
+//! a few meters inside the neighbor (projected parallels are slightly
+//! curved), which isn't crossing it in any useful sense.
 
 use crate::load::Feature;
 use crate::project::Albers;
-use crate::raster::{Raster, NONE};
-use geo::{BooleanOps, ConvexHull, Coord, Euclidean, Length, LineString, MultiLineString, MultiPolygon};
+use crate::raster::{Raster, DEPTH_UNIT, NONE};
+use geo::{BooleanOps, BoundingRect, ConvexHull, Coord, Euclidean, Length, LineString, MultiLineString, MultiPolygon};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -27,8 +33,8 @@ pub struct Params {
     pub resolution: usize,
     /// Sample points per district (pairs tested is about samples^2 / 2).
     pub samples: usize,
-    /// A segment must run at least this far inside another district for it
-    /// to count as crossing it.
+    /// A segment must reach at least this far into another district (away
+    /// from its border) for it to count as crossing it.
     pub min_cross_m: f64,
     /// Candidate pairs per district re-checked against the real polygons.
     pub confirm: usize,
@@ -55,7 +61,8 @@ pub struct Witness {
 #[derive(Debug, Clone, Serialize)]
 pub struct Crossing {
     pub geoid: String,
-    pub length_m: f64,
+    /// How far into the district the segment reaches.
+    pub depth_m: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,8 +70,8 @@ pub struct LineResult {
     pub pass: bool,
     /// The most other districts any tested segment crosses (confirmed).
     pub max_other_crossed: usize,
-    /// Over the segments checked exactly, the longest run through the
-    /// *second*-deepest other district. The district fails when this is at
+    /// Over the segments checked exactly, how far the worst segment reaches
+    /// into the *second*-deepest other district it crosses. The district fails when this is at
     /// least `min_cross_m`, so it shows how close to the line a district is.
     pub second_crossing_m: f64,
     /// Estimated share of point pairs whose segment breaks the rule.
@@ -74,9 +81,9 @@ pub struct LineResult {
 }
 
 /// Scores every district of one state. `districts` must all be in the same
-/// state; there can be at most 64 of them (California has 52).
+/// state. Any polygons work, so this also scores counties.
 pub fn score_state(districts: &[&Feature], params: &Params) -> Vec<(String, LineResult)> {
-    assert!(districts.len() <= 64, "district bitmask holds 64 districts");
+    assert!(districts.len() < NONE as usize, "too many polygons for a u16 raster");
     let polys: Vec<&MultiPolygon<f64>> = districts.iter().map(|d| &d.geom).collect();
     let raster = Raster::new(&polys, params.resolution);
     let proj = Albers::for_state(&districts[0].state_fp);
@@ -88,18 +95,22 @@ pub fn score_state(districts: &[&Feature], params: &Params) -> Vec<(String, Line
 
 fn score_district(k: usize, districts: &[&Feature], raster: &Raster, proj: &Albers, params: &Params) -> LineResult {
     let pts = sample_points(&districts[k].geom, k as u16, raster, params.samples);
-    let min_run = ((params.min_cross_m / raster.cell).ceil() as u32).max(2);
+    // Raster depth that a true crossing of `min_cross_m` must show. Cell
+    // depths are coarse, so allow a cell of slack (this only widens the
+    // candidate set; the exact check decides).
+    let unit = DEPTH_UNIT as f64;
+    let min_run = ((unit * (params.min_cross_m / raster.cell - 1.0)).floor() as u32).max(DEPTH_UNIT as u32);
 
     // Stage 1: raster search. Keep pairs that run through two or more other
     // districts, with the raster depth of the second-deepest crossing.
-    let mut candidates: Vec<(u32, u32, u64, u32)> = Vec::new();
+    let mut candidates: Vec<(u32, u32, Vec<u16>, u32)> = Vec::new();
     let mut pairs = 0usize;
     for i in 0..pts.len() {
         for j in i + 1..pts.len() {
             pairs += 1;
-            let (mask, second) = raster_crossings(raster, pts[i], pts[j], k as u16, min_run);
-            if mask.count_ones() >= 2 {
-                candidates.push((i as u32, j as u32, mask, second));
+            let t = raster_crossings(raster, pts[i], pts[j], k as u16);
+            if t.qualifying(min_run).nth(1).is_some() {
+                candidates.push((i as u32, j as u32, t.qualifying(min_run).collect(), t.second()));
             }
         }
     }
@@ -109,7 +120,7 @@ fn score_district(k: usize, districts: &[&Feature], raster: &Raster, proj: &Albe
     // Worst by districts crossed, and worst by depth of the second crossing
     // (which sets `second_crossing_m`).
     let mut by_count: Vec<usize> = (0..candidates.len()).collect();
-    by_count.sort_by_key(|&c| std::cmp::Reverse((candidates[c].2.count_ones(), candidates[c].3)));
+    by_count.sort_by_key(|&c| std::cmp::Reverse((candidates[c].2.len(), candidates[c].3)));
     let mut by_depth = by_count.clone();
     by_depth.sort_by_key(|&c| std::cmp::Reverse(candidates[c].3));
     let mut chosen: Vec<usize> = by_count.into_iter().take(params.confirm / 4).collect();
@@ -122,8 +133,8 @@ fn score_district(k: usize, districts: &[&Feature], raster: &Raster, proj: &Albe
     };
     let mut exact: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
     for &c in chosen.iter().chain(&spread) {
-        let (i, j, mask, _) = candidates[c];
-        exact.entry(c).or_insert_with(|| exact_crossings(pts[i as usize], pts[j as usize], mask, districts));
+        let (i, j, ref ids, _) = candidates[c];
+        exact.entry(c).or_insert_with(|| exact_crossings(pts[i as usize], pts[j as usize], ids, districts, params.min_cross_m / 2.0));
     }
     let confirmed = |c: &Vec<(usize, f64)>| c.iter().filter(|(_, len)| *len >= params.min_cross_m).count();
     let second = |c: &Vec<(usize, f64)>| c.get(1).map_or(0.0, |(_, len)| *len);
@@ -149,7 +160,7 @@ fn score_district(k: usize, districts: &[&Feature], raster: &Raster, proj: &Albe
     let rate = if spread.is_empty() { 0.0 } else { spread_confirmed as f64 / spread.len() as f64 };
     match best {
         Some((_, c)) => {
-            let (i, j, _, _) = candidates[c];
+            let (i, j) = (candidates[c].0, candidates[c].1);
             let (a, b) = (pts[i as usize], pts[j as usize]);
             let (alon, alat) = proj.inverse(a.x, a.y);
             let (blon, blat) = proj.inverse(b.x, b.y);
@@ -168,7 +179,7 @@ fn score_district(k: usize, districts: &[&Feature], raster: &Raster, proj: &Albe
                     crossed: exact[&c]
                         .iter()
                         .filter(|(_, len)| *len >= params.min_cross_m)
-                        .map(|&(d, len)| Crossing { geoid: districts[d].geoid.clone(), length_m: len })
+                        .map(|&(d, depth)| Crossing { geoid: districts[d].geoid.clone(), depth_m: depth })
                         .collect(),
                 }),
             }
@@ -184,41 +195,113 @@ fn score_district(k: usize, districts: &[&Feature], raster: &Raster, proj: &Albe
     }
 }
 
-/// Counts the cells segment a-b spends in each other district. Returns the
-/// mask of districts it spends at least `min_run` cells in, and the cell
-/// count of the second-deepest crossing.
-fn raster_crossings(raster: &Raster, a: Coord<f64>, b: Coord<f64>, own: u16, min_run: u32) -> (u64, u32) {
-    let mut cells = [0u32; 64];
-    raster.walk(a, b, |v| {
-        if v != NONE && v != own {
-            cells[v as usize] += 1;
-        }
-    });
-    let (mut mask, mut top, mut second) = (0u64, 0u32, 0u32);
-    for (d, &n) in cells.iter().enumerate() {
-        if n >= min_run {
-            mask |= 1 << d;
-        }
-        if n > top {
-            second = top;
-            top = n;
-        } else if n > second {
-            second = n;
-        }
-    }
-    (mask, second)
+/// The deepest raster cell a segment reaches in each other polygon, for up
+/// to `TALLY_MAX` distinct polygons (a segment inside one polygon rarely
+/// touches more).
+struct Tally {
+    ids: [u16; TALLY_MAX],
+    depth: [u32; TALLY_MAX],
+    len: usize,
 }
 
-/// Exact length (meters) of segment a-b inside each district in `mask`,
-/// longest first.
-fn exact_crossings(a: Coord<f64>, b: Coord<f64>, mask: u64, districts: &[&Feature]) -> Vec<(usize, f64)> {
+const TALLY_MAX: usize = 32;
+
+impl Tally {
+    /// Polygons the segment reaches at least `min_depth` raster units into.
+    fn qualifying(&self, min_depth: u32) -> impl Iterator<Item = u16> + '_ {
+        (0..self.len).filter(move |&i| self.depth[i] >= min_depth).map(|i| self.ids[i])
+    }
+
+    /// Raster depth of the second-deepest crossing.
+    fn second(&self) -> u32 {
+        let (mut top, mut second) = (0, 0);
+        for &n in &self.depth[..self.len] {
+            if n > top {
+                second = top;
+                top = n;
+            } else if n > second {
+                second = n;
+            }
+        }
+        second
+    }
+}
+
+fn raster_crossings(raster: &Raster, a: Coord<f64>, b: Coord<f64>, own: u16) -> Tally {
+    let mut t = Tally { ids: [0; TALLY_MAX], depth: [0; TALLY_MAX], len: 0 };
+    let mut last = (NONE, usize::MAX);
+    raster.walk(a, b, |v, d| {
+        if v == NONE || v == own {
+            return;
+        }
+        // Consecutive cells are usually the same polygon; skip the search.
+        let slot = if last.0 == v {
+            last.1
+        } else {
+            match t.ids[..t.len].iter().position(|&id| id == v) {
+                Some(i) => i,
+                None if t.len < TALLY_MAX => {
+                    t.ids[t.len] = v;
+                    t.len += 1;
+                    t.len - 1
+                }
+                None => return,
+            }
+        };
+        t.depth[slot] = t.depth[slot].max(d as u32);
+        last = (v, slot);
+    });
+    t
+}
+
+/// Exact depth (meters) segment a-b reaches into each district in `ids`,
+/// deepest first. Depths below `floor` may come back as 0.
+fn exact_crossings(a: Coord<f64>, b: Coord<f64>, ids: &[u16], districts: &[&Feature], floor: f64) -> Vec<(usize, f64)> {
     let seg = MultiLineString(vec![LineString(vec![a, b])]);
-    let mut v: Vec<(usize, f64)> = (0..districts.len())
-        .filter(|&d| mask & (1 << d) != 0)
-        .map(|d| (d, Euclidean.length(&districts[d].geom.clip(&seg, false))))
-        .collect();
+    let mut v: Vec<(usize, f64)> =
+        ids.iter().map(|&d| (d as usize, crossing_depth(&districts[d as usize].geom, &seg, floor))).collect();
     v.sort_by(|x, y| y.1.total_cmp(&x.1));
     v
+}
+
+/// How far `seg` gets from the border of `geom` while inside it.
+fn crossing_depth(geom: &MultiPolygon<f64>, seg: &MultiLineString<f64>, floor: f64) -> f64 {
+    let mut best: f64 = 0.0;
+    for piece in &geom.clip(seg, false).0 {
+        for line in piece.lines() {
+            let len = ((line.end.x - line.start.x).powi(2) + (line.end.y - line.start.y).powi(2)).sqrt();
+            // Both ends of a clipped piece lie on the border, so no point of
+            // it is deeper than half its length.
+            if len / 2.0 <= best.max(floor) {
+                continue;
+            }
+            // Depth changes no faster than position along the line, so this
+            // spacing under-reads by at most half a step.
+            let n = ((len / (floor / 2.0).max(1.0)).ceil() as usize).clamp(2, 64);
+            for k in 1..n {
+                let t = k as f64 / n as f64;
+                let p = Coord { x: line.start.x + t * (line.end.x - line.start.x), y: line.start.y + t * (line.end.y - line.start.y) };
+                best = best.max(distance_to_border(geom, p));
+            }
+        }
+    }
+    best
+}
+
+fn distance_to_border(geom: &MultiPolygon<f64>, p: Coord<f64>) -> f64 {
+    let mut best = f64::INFINITY;
+    for poly in &geom.0 {
+        for ring in std::iter::once(poly.exterior()).chain(poly.interiors()) {
+            for l in ring.lines() {
+                let (dx, dy) = (l.end.x - l.start.x, l.end.y - l.start.y);
+                let len2 = dx * dx + dy * dy;
+                let t = if len2 > 0.0 { (((p.x - l.start.x) * dx + (p.y - l.start.y) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                let (cx, cy) = (l.start.x + t * dx - p.x, l.start.y + t * dy - p.y);
+                best = best.min(cx * cx + cy * cy);
+            }
+        }
+    }
+    best.sqrt()
 }
 
 /// For a passing district: 1 if any sampled segment crosses another
@@ -227,7 +310,7 @@ fn max_single_crossing(pts: &[Coord<f64>], raster: &Raster, own: u16, min_run: u
     let step = (pts.len() / 60).max(1);
     for i in (0..pts.len()).step_by(step) {
         for j in (i + 1..pts.len()).step_by(step) {
-            if raster_crossings(raster, pts[i], pts[j], own, min_run).0 != 0 {
+            if raster_crossings(raster, pts[i], pts[j], own).qualifying(min_run).next().is_some() {
                 return 1;
             }
         }
@@ -268,8 +351,21 @@ pub fn sample_points(geom: &MultiPolygon<f64>, own: u16, raster: &Raster, n: usi
         }
     }
 
-    // Interior cells, evenly spread in scan order.
-    let cells: Vec<usize> = raster.cells.iter().enumerate().filter(|(_, &v)| v == own).map(|(i, _)| i).collect();
+    // Interior cells, evenly spread in scan order. Only the polygon's own
+    // bounding box is scanned.
+    let mut cells: Vec<usize> = Vec::new();
+    if let Some(r) = geom.bounding_rect() {
+        let (lo, hi) = (raster.to_grid(r.min()), raster.to_grid(r.max()));
+        let (i0, j0) = (lo.x.floor().max(0.0) as usize, lo.y.floor().max(0.0) as usize);
+        let (i1, j1) = ((hi.x.ceil() as usize + 1).min(raster.w), (hi.y.ceil() as usize + 1).min(raster.h));
+        for j in j0..j1 {
+            for i in i0..i1 {
+                if raster.cells[j * raster.w + i] == own {
+                    cells.push(j * raster.w + i);
+                }
+            }
+        }
+    }
     let interior_take = n.saturating_sub(pts.len());
     for idx in spread(&cells, interior_take) {
         pts.push(raster.center(idx % raster.w, idx / raster.w));
@@ -343,6 +439,20 @@ mod tests {
         for id in ["9902", "9903"] {
             assert!(results.iter().find(|(i, _)| i == id).unwrap().1.pass);
         }
+    }
+
+    #[test]
+    fn hugging_a_border_is_not_crossing() {
+        // District 01's southern border bows 20 m north in the middle, so the
+        // straight line between its two bottom corners runs 15 km inside each
+        // of 02 and 03, but never more than 20 m from their border.
+        let top = polygon![(x: 0.0, y: 0.0), (x: 15_000.0, y: 20.0), (x: 30_000.0, y: 0.0), (x: 30_000.0, y: 10_000.0), (x: 0.0, y: 10_000.0)];
+        let left = polygon![(x: 0.0, y: -10_000.0), (x: 15_000.0, y: -10_000.0), (x: 15_000.0, y: 20.0), (x: 0.0, y: 0.0)];
+        let right = polygon![(x: 15_000.0, y: -10_000.0), (x: 30_000.0, y: -10_000.0), (x: 30_000.0, y: 0.0), (x: 15_000.0, y: 20.0)];
+        let fs = vec![feature("9901", top), feature("9902", left), feature("9903", right)];
+        let refs: Vec<&Feature> = fs.iter().collect();
+        let results = score_state(&refs, &params());
+        assert!(results.iter().all(|(_, r)| r.pass), "{results:?}");
     }
 
     #[test]

@@ -53,6 +53,16 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         states: Vec<String>,
     },
+    /// Apply the line rule to counties instead of districts, as a baseline.
+    /// Writes results/county_line_rule.csv.
+    Counties {
+        #[arg(long, default_value_t = 4096)]
+        resolution: usize,
+        #[arg(long, default_value_t = 500)]
+        samples: usize,
+        #[arg(long, default_value_t = 250.0)]
+        min_cross_m: f64,
+    },
     /// Build results/report.html from the scorecards present.
     Report,
 }
@@ -85,6 +95,12 @@ fn main() -> Result<()> {
                 count(|r| r.both_pass),
                 t.elapsed().as_secs_f64()
             );
+            Ok(())
+        }
+        Cmd::Counties { resolution, samples, min_cross_m } => {
+            let params = line_rule::Params { resolution, samples, min_cross_m, ..Default::default() };
+            let path = scorecard::county_line_rule(&cli.data, &cli.out, &params)?;
+            println!("wrote {}", path.display());
             Ok(())
         }
         Cmd::Report => {

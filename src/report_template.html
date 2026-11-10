@@ -21,6 +21,7 @@
   --critical: #d03b3b;
   --series-1: #2a78d6;
   --series-2: #eb6834;
+  --series-3: #1baf7a;
   --county-line: rgba(11,11,11,0.28);
 }
 @media (prefers-color-scheme: dark) {
@@ -35,6 +36,7 @@
     --border: rgba(255,255,255,0.10);
     --series-1: #3987e5;
     --series-2: #d95926;
+    --series-3: #199e70;
     --county-line: rgba(255,255,255,0.30);
   }
 }
@@ -49,6 +51,7 @@
   --border: rgba(255,255,255,0.10);
   --series-1: #3987e5;
   --series-2: #d95926;
+  --series-3: #199e70;
   --county-line: rgba(255,255,255,0.30);
 }
 * { box-sizing: border-box; }
@@ -108,6 +111,7 @@ input[type=range] { width: 160px; accent-color: var(--ink); }
 #tolChart .base { stroke: var(--axis); stroke-width: 1; }
 #tolChart .s1 { stroke: var(--series-1); }
 #tolChart .s2 { stroke: var(--series-2); }
+#tolChart .s3 { stroke: var(--series-3); }
 #tolChart .ser { fill: none; stroke-width: 2; stroke-linejoin: round; }
 #tolChart .mark { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 3 3; }
 #tolChart .xh { stroke: var(--ink-2); stroke-width: 1; }
@@ -201,9 +205,9 @@ code { font-size: 13px; }
 
   <h2>How strict is the line rule?</h2>
   <div class="card">
-    <p class="chart-title">Districts passing the line rule, by tolerance</p>
-    <p class="chart-sub">Tolerance is how far a line may run inside a second other district before it counts as crossing it. The dashed line marks the current setting.</p>
-    <svg id="tolChart" viewBox="0 0 720 260" role="img" aria-label="Line chart of districts passing the line rule as tolerance increases"></svg>
+    <p class="chart-title">Share passing the line rule, by tolerance</p>
+    <p class="chart-sub">Tolerance is how far a line may reach into a second other district, measured from that district's border, before it counts as crossing it. Counties are scored the same way against the other counties in their state, as a baseline of boundaries not drawn for elections. The dashed line marks the current setting.</p>
+    <svg id="tolChart" viewBox="0 0 720 260" role="img" aria-label="Line chart of the share of districts and counties passing the line rule as tolerance increases"></svg>
     <div class="legend" id="tolLegend" style="margin-top:6px"></div>
   </div>
 
@@ -211,7 +215,7 @@ code { font-size: 13px; }
   <div class="card tblwrap"><table id="stateTable"></table></div>
 
   <div class="toolbar"><h2>State maps</h2><button class="linkbtn" id="toggleAll">Expand all</button></div>
-  <p class="chart-sub">Hover or tap a district for details. In line-rule view, the black segment is the worst line found: it runs through two or more other districts past the tolerance. In county-rule view, dashed outlines mark split counties.</p>
+  <p class="chart-sub">Hover or tap a district for details. In line-rule view, the black segment is the worst line found: it reaches past the tolerance into two or more other districts. In county-rule view, dashed outlines mark split counties.</p>
   <div id="states">__STATES__</div>
 
   <h2>Method</h2>
@@ -322,11 +326,16 @@ code { font-size: 13px; }
   const W = 720, H = 260, M = { l: 44, r: 64, t: 12, b: 34 };
   const xmin = Math.log(TOLS[0]), xmax = Math.log(TOLS[TOLS.length - 1]);
   const X = t => M.l + (Math.log(t) - xmin) / (xmax - xmin) * (W - M.l - M.r);
-  const ymax = Math.ceil(DATA.cards[0].rows.length / 100) * 100;
-  const Y = v => H - M.b - v / ymax * (H - M.t - M.b);
+  const Y = v => H - M.b - v / 100 * (H - M.t - M.b);
   const grid = [];
   for (let i = 0; i <= 80; i++) grid.push(Math.exp(xmin + (xmax - xmin) * i / 80));
-  const series = DATA.cards.map((c, i) => ({ c: c.congress, cls: 's' + (i + 1), pts: grid.map(t => [t, counts(c, t).l]) }));
+  // Each series: label, CSS class, and per-grid-point [count passing, total].
+  const series = DATA.cards.map((c, i) => ({ name: ordinal(c.congress) + ' districts', short: ordinal(c.congress), cls: 's' + (i + 1), pts: grid.map(t => [counts(c, t).l, c.rows.length]) }));
+  if (DATA.county_depths) {
+    const cd = DATA.county_depths;
+    series.push({ name: 'Counties', short: 'Counties', cls: 's3', pts: grid.map(t => [cd.filter(s => s < t).length, cd.length]) });
+  }
+  const pct = p => 100 * p[0] / p[1];
   const NS = 'http://www.w3.org/2000/svg';
   const sv = (tag, attrs, text) => {
     const e = document.createElementNS(NS, tag);
@@ -334,24 +343,23 @@ code { font-size: 13px; }
     if (text != null) e.textContent = text;
     chart.appendChild(e); return e;
   };
-  for (let v = 0; v <= ymax; v += 100) {
+  for (let v = 0; v <= 100; v += 25) {
     sv('line', { class: v ? 'gl' : 'base', x1: M.l, x2: W - M.r, y1: Y(v), y2: Y(v) });
-    sv('text', { x: M.l - 8, y: Y(v) + 4, 'text-anchor': 'end' }, String(v));
+    sv('text', { x: M.l - 8, y: Y(v) + 4, 'text-anchor': 'end' }, v + '%');
   }
   for (const t of [0.25, 1, 5, 25, 100].filter(t => t >= TOLS[0])) {
     sv('text', { x: X(t), y: H - M.b + 18, 'text-anchor': 'middle' }, fmtKm(t));
   }
   sv('text', { x: (M.l + W - M.r) / 2, y: H - 2, 'text-anchor': 'middle' }, 'Tolerance (log scale)');
   for (const s of series) {
-    sv('path', { class: 'ser ' + s.cls, d: s.pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1)).join('') });
+    sv('path', { class: 'ser ' + s.cls, d: s.pts.map((p, i) => (i ? 'L' : 'M') + X(grid[i]).toFixed(1) + ' ' + Y(pct(p)).toFixed(1)).join('') });
   }
   // Direct labels at the right end, nudged apart if they collide.
-  const ends = series.map(s => ({ s, y: Y(s.pts[s.pts.length - 1][1]) }));
-  if (ends.length === 2 && Math.abs(ends[0].y - ends[1].y) < 14) {
-    const mid = (ends[0].y + ends[1].y) / 2, up = ends[0].y <= ends[1].y ? 0 : 1;
-    ends[up].y = mid - 7; ends[1 - up].y = mid + 7;
-  }
-  for (const e of ends) sv('text', { class: 'dl', x: W - M.r + 6, y: e.y + 4 }, ordinal(e.s.c));
+  // Direct labels at the left end, where the series are furthest apart,
+  // spread to at least 14px apart.
+  const ends = series.map(s => ({ s, y: Y(pct(s.pts[0])) })).sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 14);
+  for (const e of ends) sv('text', { class: 'dl', x: M.l + 6, y: e.y - 6 }, e.s.short);
   const mark = sv('line', { class: 'mark', y1: M.t, y2: H - M.b });
   const xh = sv('line', { class: 'xh', y1: M.t, y2: H - M.b, visibility: 'hidden' });
   const dots = series.map(s => sv('circle', { class: 'dot', r: 4, fill: 'var(--series-' + s.cls.slice(1) + ')', visibility: 'hidden' }));
@@ -373,17 +381,20 @@ code { font-size: 13px; }
     grid.forEach((t, i) => { const d = Math.abs(X(t) - p.x); if (d < bd) { bd = d; best = i; } });
     const t = grid[best];
     xh.setAttribute('x1', X(t)); xh.setAttribute('x2', X(t)); xh.setAttribute('visibility', 'visible');
-    series.forEach((s, i) => { dots[i].setAttribute('cx', X(t)); dots[i].setAttribute('cy', Y(s.pts[best][1])); dots[i].setAttribute('visibility', 'visible'); });
+    series.forEach((s, i) => { dots[i].setAttribute('cx', X(t)); dots[i].setAttribute('cy', Y(pct(s.pts[best]))); dots[i].setAttribute('visibility', 'visible'); });
     showTip(e.clientX, e.clientY, tp => {
       tp.appendChild(el('b', null, 'Tolerance ' + fmtKm(t)));
-      for (const s of series) tp.appendChild(el('div', { class: 'row' }, ordinal(s.c) + ' Congress: ' + s.pts[best][1] + ' districts pass'));
+      for (const s of series) {
+        const p = s.pts[best];
+        tp.appendChild(el('div', { class: 'row' }, s.name + ': ' + Math.round(pct(p)) + '% pass (' + p[0] + ' of ' + p[1] + ')'));
+      }
     });
   });
   hit.addEventListener('pointerleave', () => { xh.setAttribute('visibility', 'hidden'); dots.forEach(d => d.setAttribute('visibility', 'hidden')); hideTip(); });
   const tl = $('#tolLegend');
   series.forEach(s => {
     const sp = el('span'); const i = el('i'); i.style.background = 'var(--series-' + s.cls.slice(1) + ')'; i.style.height = '3px'; i.style.verticalAlign = '3px';
-    sp.appendChild(i); sp.appendChild(document.createTextNode(ordinal(s.c) + ' Congress')); tl.appendChild(sp);
+    sp.appendChild(i); sp.appendChild(document.createTextNode(s.name)); tl.appendChild(sp);
   });
 
   // State table
@@ -535,9 +546,10 @@ code { font-size: 13px; }
   const notes = [
     ['Data', 'District shapes: Census Bureau cartographic boundary files (1:500,000) for the ' + congresses.map(ordinal).join(' and ') + ' Congresses. These are clipped to the shoreline, so open water is a neutral gap. County splits: Census district-to-county relationship tables, which give the exact land area of every piece of every county, built from census blocks. Counties are 2020 definitions, so Connecticut uses its eight historic counties. The 119th Congress files reflect maps in force in January 2025. Maps redrawn later are not included.'],
     ['County rule', 'A county is split when its land lies in two or more districts; a piece of water alone doesn\'t count. Each district holding part of a split county includes it as a partial county. A district lying entirely inside one large county, such as one of the Los Angeles County districts, has exactly one partial county and passes. A district built entirely from whole counties has zero.'],
-    ['Line rule', 'Every pair of ' + c0.samples + ' sample points per district is tested. Points come from the convex hull, evenly along the true boundary, and spread through the interior: about ' + Math.round(c0.samples * (c0.samples - 1) / 2 / 1000) + ',000 segments per district. Each segment is first walked through a raster of the state (' + c0.resolution + ' cells along its longer side). Candidates are then confirmed by clipping the segment against the real district polygons. A segment crosses a district when it runs at least the tolerance inside it. The default tolerance of ' + fmtKm(base) + ' absorbs boundary noise. Points on a district\'s boundary count as inside it.'],
-    ['Depth of 2nd crossing', 'For each district, the deepest second crossing found over the tested segments: how far the worst line runs through the second of the other districts it crosses. A district fails at any tolerance below this depth, which is what the slider uses. With one or two districts in a state the rule can\'t fail, because there aren\'t two other districts to cross.'],
-    ['Limits', 'Sampling can miss a violation that only very specific point pairs would reveal, so a pass means "no violation found". In testing, raising the sample count from 500 to 1,000 changed the national pass count by at most one district. Fails are always confirmed against the true polygons.'],
+    ['Line rule', 'Every pair of ' + c0.samples + ' sample points per district is tested. Points come from the convex hull, evenly along the true boundary, and spread through the interior: about ' + Math.round(c0.samples * (c0.samples - 1) / 2 / 1000) + ',000 segments per district. Each segment is first walked through a raster of the state (' + c0.resolution + ' cells along its longer side). Candidates are then confirmed by clipping the segment against the real district polygons. A segment crosses a district when it reaches at least the tolerance into it, measured as distance from that district\'s border. Measuring depth rather than length matters: a line between two points on one border can run for kilometers a few meters inside the neighbor, and that shouldn\'t count. The default tolerance of ' + fmtKm(base) + ' absorbs boundary noise. Points on a district\'s boundary count as inside it.'],
+    ['Depth of 2nd crossing', 'For each district, the worst line\'s depth into the second of the other districts it crosses. A district fails at any tolerance below this depth, which is what the slider uses. With one or two districts in a state the rule can\'t fail, because there aren\'t two other districts to cross.'],
+    ['County baseline', 'Counties are scored by the same line rule, with the other counties of the same state in place of other districts. Counties weren\'t drawn for elections, so their pass rate shows how much of a failure comes from ordinary irregular borders such as rivers and coastlines.'],
+    ['Limits', 'Sampling can miss a violation that only very specific point pairs would reveal, so a pass means "no violation found". In testing, raising the sample count from 500 to 1,000 found violations in two more districts nationally. Fails are always confirmed against the true polygons. The slider estimates pass counts at other tolerances from each district\'s 2nd-crossing depth; a full rerun at 5 km and 10 km matched it to within 6 districts.'],
   ];
   for (const [h, p] of notes) { m.appendChild(el('h3', null, h)); m.appendChild(el('p', null, p)); }
 

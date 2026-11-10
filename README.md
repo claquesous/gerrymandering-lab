@@ -15,6 +15,7 @@ Needs Rust 1.85+ (pinned to 1.99.1 in `.tool-versions`), plus `curl` and `unzip`
 cargo run --release -- fetch                  # ~40 MB of Census files into data/raw/
 cargo run --release -- score --congress 119   # results/scorecard_cd119.{csv,json}, states_cd119.csv
 cargo run --release -- score --congress 118
+cargo run --release -- counties               # line rule applied to counties (baseline), ~20 s
 cargo run --release -- report                 # results/report.html (self-contained)
 ```
 
@@ -22,7 +23,7 @@ cargo run --release -- report                 # results/report.html (self-contai
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--min-cross-m` | 250 | How far a line must run inside another district to count as crossing it |
+| `--min-cross-m` | 250 | How far a line must reach into another district, measured from its border, to count as crossing it |
 | `--samples` | 500 | Sample points per district (about 125k segments each) |
 | `--resolution` | 4096 | Raster cells along each state's longer side |
 | `--states MD,IL` | all | Score only these states |
@@ -44,9 +45,11 @@ The 119th Congress files reflect maps in force in January 2025. Maps redrawn aft
 - **County rule:** exact. It uses the relationship table's land areas, which are built from census blocks, so no geometric tolerance is involved. Pieces that are only water are ignored.
 - **Line rule** (`src/line_rule.rs`), all in an Albers equal-area projection:
   1. Sample points on each district's convex hull, evenly along its true boundary, and spread through its interior.
-  2. Walk every pair of points through a raster of the state, counting the cells spent in each other district.
+  2. Walk every pair of points through a raster of the state, noting the deepest cell reached in each other district. Each cell's depth (distance to the nearest border) comes from a chamfer distance transform.
   3. Re-check the worst candidates, plus an even spread of the rest, by clipping the segment against the real polygons.
   4. Only confirmed crossings fail a district.
+- **Crossings are measured by depth, not length.** Depth is how far the line gets from the other district's border. A line between two points on one border, such as a county line that follows a parallel, can run for kilometers a few meters inside the neighbor, because parallels are slightly curved in the projection. That shouldn't count as crossing.
+- **County baseline:** `counties` applies the same rule to every county, with the other counties of its state in place of other districts. At 250 m, 58% of counties fail (mostly by under 2 km, along rivers and coastlines), against 89% of districts. At 5 km the figures are 4% and 41%.
 - `second_crossing_km` is the depth of the worst line's *second* crossing. A district fails at any tolerance below it, which is how the report's tolerance slider works without rerunning anything.
 - `violating_pair_fraction` is the raster share of failing pairs, scaled by the share of that sample confirmed exactly.
 
@@ -63,4 +66,4 @@ src/scorecard.rs      CSV/JSON output
 src/report.rs         HTML report (template: src/report_template.html)
 ```
 
-`cargo test` runs unit tests on synthetic geometry: a U-shaped district wrapped around two others fails, a grid of squares passes, and projection area and round-trip checks pass.
+`cargo test` runs unit tests on synthetic geometry: a U-shaped district wrapped around two others fails, a grid of squares passes, a line hugging a slightly bowed border doesn't count as crossing, and projection area and round-trip checks pass.
