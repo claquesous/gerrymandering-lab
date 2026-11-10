@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>District Rule Scorecard</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --county-line: rgba(11,11,11,0.28);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --county-line: rgba(255,255,255,0.30);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --county-line: rgba(255,255,255,0.30);
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px 64px; }
+header.top { padding: 32px 0 8px; }
+h1 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+h2 { font-size: 19px; margin: 40px 0 12px; }
+p.lede { color: var(--ink-2); margin: 0; max-width: 72ch; }
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 20px 0 0; }
+.rule { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.rule b { display: block; margin-bottom: 4px; }
+.rule span { color: var(--ink-2); font-size: 14px; }
+
+.controls {
+  position: sticky; top: 0; z-index: 5; background: var(--page);
+  border-bottom: 1px solid var(--border); margin: 24px -16px 0; padding: 12px 16px;
+  display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center;
+}
+.ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctl > label, .ctl > .lab { font-size: 13px; color: var(--ink-2); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button {
+  font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--ink-2);
+  padding: 6px 12px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+input[type=range] { width: 160px; accent-color: var(--ink); }
+#tolOut { font-variant-numeric: tabular-nums; font-size: 13px; min-width: 56px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.legend .wl { width: 18px; height: 0; border-top: 2px solid var(--ink); border-radius: 0; vertical-align: 3px; }
+.legend .sc { width: 16px; height: 10px; border: 1.5px dashed var(--ink); background: transparent; border-radius: 2px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-top: 20px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.tile .k { font-size: 13px; color: var(--ink-2); }
+.tile .v { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.tile .v small { font-size: 15px; font-weight: 400; color: var(--ink-2); margin-left: 6px; }
+.tile .d { font-size: 13px; color: var(--muted); }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.chart-title { font-weight: 600; margin: 0 0 2px; }
+.chart-sub { color: var(--ink-2); font-size: 13px; margin: 0 0 10px; }
+#tolChart { width: 100%; height: auto; display: block; touch-action: pan-y; }
+#tolChart text { fill: var(--muted); font-size: 11px; }
+#tolChart .gl { stroke: var(--grid); stroke-width: 1; }
+#tolChart .base { stroke: var(--axis); stroke-width: 1; }
+#tolChart .s1 { stroke: var(--series-1); }
+#tolChart .s2 { stroke: var(--series-2); }
+#tolChart .ser { fill: none; stroke-width: 2; stroke-linejoin: round; }
+#tolChart .mark { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 3 3; }
+#tolChart .xh { stroke: var(--ink-2); stroke-width: 1; }
+#tolChart .dot { stroke: var(--surface); stroke-width: 2; }
+#tolChart .dl { font-size: 12px; fill: var(--ink-2); }
+
+.tblwrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { font-size: 12px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
+td.n, th.n { text-align: right; }
+tbody tr:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+#stateTable tbody tr { cursor: pointer; }
+.chip { white-space: nowrap; }
+.chip::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.chip.ok::before { background: var(--good); }
+.chip.bad::before { background: var(--critical); }
+.sub { color: var(--muted); font-size: 12px; }
+.chg { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+
+.toolbar { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.linkbtn { font: inherit; font-size: 13px; background: none; border: 0; color: var(--series-1); cursor: pointer; padding: 0; }
+section.state { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin: 10px 0; }
+section.state summary { cursor: pointer; padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; list-style: none; }
+section.state summary::-webkit-details-marker { display: none; }
+section.state summary::before { content: "▸"; color: var(--muted); width: 12px; }
+section.state details[open] summary::before { content: "▾"; }
+.sname { font-weight: 600; }
+.ssum { color: var(--ink-2); font-size: 13px; }
+.sbody { padding: 0 16px 16px; display: grid; gap: 16px; }
+.mapwrap { max-width: 640px; width: 100%; }
+svg.map { width: 100%; height: auto; display: none; }
+body[data-congress="119"] svg.map[data-congress="119"],
+body[data-congress="118"] svg.map[data-congress="118"] { display: block; }
+.map .dst path { stroke: none; cursor: pointer; }
+.map .dst path.ok { fill: var(--good); }
+.map .dst path.warn { fill: var(--warning); }
+.map .dst path.bad { fill: var(--critical); }
+.map .dst path:hover, .map .dst path.hot { filter: brightness(1.12); }
+.map .cty path { fill: none; stroke: var(--county-line); stroke-width: 0.5; pointer-events: none; }
+body[data-view="county"] .map .cty path.split { stroke: var(--ink); stroke-width: 1.4; stroke-dasharray: 3 2; }
+.map .dline path { fill: none; stroke: var(--surface); stroke-width: 1.6; stroke-linejoin: round; pointer-events: none; }
+.map .wit g { display: none; pointer-events: none; }
+.map .wit g.on { display: inline; }
+.map .wit line { stroke: var(--ink); stroke-width: 2; }
+.map .wit circle { fill: var(--ink); stroke: var(--surface); stroke-width: 1.5; }
+.map .lbl text { font-size: 11px; font-weight: 600; text-anchor: middle; dominant-baseline: central; fill: var(--ink); stroke: var(--surface); stroke-width: 3px; paint-order: stroke; pointer-events: none; }
+.dtwrap { overflow-x: auto; }
+
+#tip {
+  position: fixed; z-index: 20; pointer-events: none; display: none; max-width: 320px;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12); padding: 10px 12px; font-size: 13px;
+}
+#tip b { display: block; margin-bottom: 4px; }
+#tip .row { color: var(--ink-2); }
+#tip .row + .row { margin-top: 4px; }
+
+.method { max-width: 78ch; color: var(--ink-2); }
+.method h3 { color: var(--ink); font-size: 15px; margin: 22px 0 4px; }
+.method p, .method li { margin: 4px 0; }
+code { font-size: 13px; }
+@media (max-width: 600px) {
+  h1 { font-size: 23px; }
+  .tile .v { font-size: 24px; }
+  input[type=range] { width: 120px; }
+}
+</style>
+</head>
+<body data-congress="119" data-view="both">
+<div class="wrap">
+  <header class="top">
+    <h1>Congressional District Rule Scorecard</h1>
+    <p class="lede">How today's House districts would fare under two simple anti-gerrymandering rules. Districts are scored as drawn; no new maps are proposed.</p>
+    <div class="rules">
+      <div class="rule"><b>County rule</b><span>A district may include at most one partial county, meaning a county whose land is split with another district.</span></div>
+      <div class="rule"><b>Line rule</b><span>A straight line between any two points in a district may not cross two or more other districts in the same state. Water and other states don't count.</span></div>
+    </div>
+  </header>
+
+  <div class="controls" role="region" aria-label="Report controls">
+    <div class="ctl"><span class="lab">Congress</span><div class="seg" id="congressSeg"></div></div>
+    <div class="ctl"><span class="lab">Color by</span><div class="seg" id="viewSeg">
+      <button data-v="both" aria-pressed="true">Both rules</button><button data-v="county" aria-pressed="false">County rule</button><button data-v="line" aria-pressed="false">Line rule</button>
+    </div></div>
+    <div class="ctl"><label for="tol">Line tolerance</label><input type="range" id="tol" min="0" max="10" step="1" value="0"><span id="tolOut"></span></div>
+    <div class="legend" id="legend" aria-live="polite"></div>
+  </div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <h2>How strict is the line rule?</h2>
+  <div class="card">
+    <p class="chart-title">Districts passing the line rule, by tolerance</p>
+    <p class="chart-sub">Tolerance is how far a line may run inside a second other district before it counts as crossing it. The dashed line marks the current setting.</p>
+    <svg id="tolChart" viewBox="0 0 720 260" role="img" aria-label="Line chart of districts passing the line rule as tolerance increases"></svg>
+    <div class="legend" id="tolLegend" style="margin-top:6px"></div>
+  </div>
+
+  <h2>States</h2>
+  <div class="card tblwrap"><table id="stateTable"></table></div>
+
+  <div class="toolbar"><h2>State maps</h2><button class="linkbtn" id="toggleAll">Expand all</button></div>
+  <p class="chart-sub">Hover or tap a district for details. In line-rule view, the black segment is the worst line found: it runs through two or more other districts past the tolerance. In county-rule view, dashed outlines mark split counties.</p>
+  <div id="states">__STATES__</div>
+
+  <h2>Method</h2>
+  <div class="method" id="method"></div>
+</div>
+<div id="tip" role="tooltip"></div>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById('data').textContent);
+  const cards = {};
+  for (const c of DATA.cards) {
+    c.byG = new Map(c.rows.map(r => [r.g, r]));
+    c.byState = new Map(c.states.map(s => [s.st, s]));
+    cards[c.congress] = c;
+  }
+  const congresses = DATA.cards.map(c => c.congress);
+  const base = DATA.cards[0].min_cross_km;
+  const TOLS = [base, 0.5, 1, 2, 3, 5, 10, 15, 25, 50, 100].filter((t, i) => i === 0 || t > base);
+  const st = { congress: congresses[0], view: 'both', tol: TOLS[0] };
+  const $ = (s, el) => (el || document).querySelector(s);
+  const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
+  const el = (tag, attrs, text) => {
+    const e = document.createElement(tag);
+    for (const k in attrs || {}) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    return e;
+  };
+  const fmtKm = km => km < 1 ? Math.round(km * 1000) + ' m' : (km < 10 ? km.toFixed(1) : Math.round(km)) + ' km';
+  const ordinal = n => n + 'th';
+  const linePass = (r, T) => r.s < T;
+  const other = () => congresses.find(c => c !== st.congress);
+
+  function status(r) {
+    const c = r.c, l = linePass(r, st.tol);
+    if (st.view === 'county') return c ? 'ok' : 'bad';
+    if (st.view === 'line') return l ? 'ok' : 'bad';
+    return c && l ? 'ok' : (c || l ? 'warn' : 'bad');
+  }
+  function counts(card, T) {
+    let c = 0, l = 0, b = 0;
+    for (const r of card.rows) {
+      const lp = linePass(r, T);
+      c += r.c; l += lp; b += r.c && lp;
+    }
+    return { n: card.rows.length, c, l, b };
+  }
+
+  // Controls
+  const cseg = $('#congressSeg');
+  for (const c of congresses) {
+    const b = el('button', { 'data-c': c, 'aria-pressed': String(c === st.congress) }, ordinal(c));
+    cseg.appendChild(b);
+  }
+  cseg.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    st.congress = +b.dataset.c; render();
+  });
+  $('#viewSeg').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    st.view = b.dataset.v; render();
+  });
+  const tol = $('#tol');
+  tol.max = TOLS.length - 1;
+  tol.addEventListener('input', () => { st.tol = TOLS[+tol.value]; render(); });
+
+  function renderLegend() {
+    const L = $('#legend'); L.textContent = '';
+    const items = st.view === 'both'
+      ? [['good', 'Passes both'], ['warning', 'Fails one'], ['critical', 'Fails both']]
+      : [['good', 'Passes'], ['critical', 'Fails']];
+    for (const [k, t] of items) {
+      const s = el('span'); const i = el('i'); i.style.background = 'var(--' + k + ')';
+      s.appendChild(i); s.appendChild(document.createTextNode(t)); L.appendChild(s);
+    }
+    if (st.view !== 'county') {
+      const s = el('span'); s.appendChild(el('i', { class: 'wl' })); s.appendChild(document.createTextNode('Worst line')); L.appendChild(s);
+    }
+    if (st.view === 'county') {
+      const s = el('span'); s.appendChild(el('i', { class: 'sc' })); s.appendChild(document.createTextNode('Split county')); L.appendChild(s);
+    }
+  }
+
+  function renderTiles() {
+    const T = $('#tiles'); T.textContent = '';
+    const cur = counts(cards[st.congress], st.tol);
+    const o = other(); const prev = o ? counts(cards[o], st.tol) : null;
+    const pct = (x, n) => Math.round(100 * x / n) + '%';
+    const tiles = [
+      ['Districts', cur.n, null, prev && prev.n],
+      ['Pass county rule', cur.c, pct(cur.c, cur.n), prev && prev.c],
+      ['Pass line rule', cur.l, pct(cur.l, cur.n), prev && prev.l],
+      ['Pass both rules', cur.b, pct(cur.b, cur.n), prev && prev.b],
+    ];
+    for (const [k, v, p, pv] of tiles) {
+      const t = el('div', { class: 'tile' });
+      t.appendChild(el('div', { class: 'k' }, k));
+      const vv = el('div', { class: 'v' }, String(v));
+      if (p) vv.appendChild(el('small', null, p));
+      t.appendChild(vv);
+      if (pv != null) t.appendChild(el('div', { class: 'd' }, ordinal(o) + ' Congress: ' + pv));
+      T.appendChild(t);
+    }
+  }
+
+  // Tolerance curve
+  const chart = $('#tolChart');
+  const W = 720, H = 260, M = { l: 44, r: 64, t: 12, b: 34 };
+  const xmin = Math.log(TOLS[0]), xmax = Math.log(TOLS[TOLS.length - 1]);
+  const X = t => M.l + (Math.log(t) - xmin) / (xmax - xmin) * (W - M.l - M.r);
+  const ymax = Math.ceil(DATA.cards[0].rows.length / 100) * 100;
+  const Y = v => H - M.b - v / ymax * (H - M.t - M.b);
+  const grid = [];
+  for (let i = 0; i <= 80; i++) grid.push(Math.exp(xmin + (xmax - xmin) * i / 80));
+  const series = DATA.cards.map((c, i) => ({ c: c.congress, cls: 's' + (i + 1), pts: grid.map(t => [t, counts(c, t).l]) }));
+  const NS = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    chart.appendChild(e); return e;
+  };
+  for (let v = 0; v <= ymax; v += 100) {
+    sv('line', { class: v ? 'gl' : 'base', x1: M.l, x2: W - M.r, y1: Y(v), y2: Y(v) });
+    sv('text', { x: M.l - 8, y: Y(v) + 4, 'text-anchor': 'end' }, String(v));
+  }
+  for (const t of [0.25, 1, 5, 25, 100].filter(t => t >= TOLS[0])) {
+    sv('text', { x: X(t), y: H - M.b + 18, 'text-anchor': 'middle' }, fmtKm(t));
+  }
+  sv('text', { x: (M.l + W - M.r) / 2, y: H - 2, 'text-anchor': 'middle' }, 'Tolerance (log scale)');
+  for (const s of series) {
+    sv('path', { class: 'ser ' + s.cls, d: s.pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1)).join('') });
+  }
+  // Direct labels at the right end, nudged apart if they collide.
+  const ends = series.map(s => ({ s, y: Y(s.pts[s.pts.length - 1][1]) }));
+  if (ends.length === 2 && Math.abs(ends[0].y - ends[1].y) < 14) {
+    const mid = (ends[0].y + ends[1].y) / 2, up = ends[0].y <= ends[1].y ? 0 : 1;
+    ends[up].y = mid - 7; ends[1 - up].y = mid + 7;
+  }
+  for (const e of ends) sv('text', { class: 'dl', x: W - M.r + 6, y: e.y + 4 }, ordinal(e.s.c));
+  const mark = sv('line', { class: 'mark', y1: M.t, y2: H - M.b });
+  const xh = sv('line', { class: 'xh', y1: M.t, y2: H - M.b, visibility: 'hidden' });
+  const dots = series.map(s => sv('circle', { class: 'dot', r: 4, fill: 'var(--series-' + s.cls.slice(1) + ')', visibility: 'hidden' }));
+  const hit = sv('rect', { x: M.l, y: M.t, width: W - M.l - M.r, height: H - M.t - M.b, fill: 'transparent' });
+  const tip = $('#tip');
+  function showTip(x, y, build) {
+    tip.textContent = ''; build(tip); tip.style.display = 'block';
+    const r = tip.getBoundingClientRect();
+    let left = x + 14, top = y + 14;
+    if (left + r.width > innerWidth - 8) left = x - r.width - 14;
+    if (top + r.height > innerHeight - 8) top = y - r.height - 14;
+    tip.style.left = Math.max(8, left) + 'px'; tip.style.top = Math.max(8, top) + 'px';
+  }
+  function hideTip() { tip.style.display = 'none'; }
+  hit.addEventListener('pointermove', e => {
+    const pt = chart.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const p = pt.matrixTransform(chart.getScreenCTM().inverse());
+    let best = 0, bd = Infinity;
+    grid.forEach((t, i) => { const d = Math.abs(X(t) - p.x); if (d < bd) { bd = d; best = i; } });
+    const t = grid[best];
+    xh.setAttribute('x1', X(t)); xh.setAttribute('x2', X(t)); xh.setAttribute('visibility', 'visible');
+    series.forEach((s, i) => { dots[i].setAttribute('cx', X(t)); dots[i].setAttribute('cy', Y(s.pts[best][1])); dots[i].setAttribute('visibility', 'visible'); });
+    showTip(e.clientX, e.clientY, tp => {
+      tp.appendChild(el('b', null, 'Tolerance ' + fmtKm(t)));
+      for (const s of series) tp.appendChild(el('div', { class: 'row' }, ordinal(s.c) + ' Congress: ' + s.pts[best][1] + ' districts pass'));
+    });
+  });
+  hit.addEventListener('pointerleave', () => { xh.setAttribute('visibility', 'hidden'); dots.forEach(d => d.setAttribute('visibility', 'hidden')); hideTip(); });
+  const tl = $('#tolLegend');
+  series.forEach(s => {
+    const sp = el('span'); const i = el('i'); i.style.background = 'var(--series-' + s.cls.slice(1) + ')'; i.style.height = '3px'; i.style.verticalAlign = '3px';
+    sp.appendChild(i); sp.appendChild(document.createTextNode(ordinal(s.c) + ' Congress')); tl.appendChild(sp);
+  });
+
+  // State table
+  function stateStats(card, abbr) {
+    const rows = card.rows.filter(r => r.l.startsWith(abbr + '-'));
+    let c = 0, l = 0, b = 0;
+    for (const r of rows) { const lp = linePass(r, st.tol); c += r.c; l += lp; b += r.c && lp; }
+    return { rows, n: rows.length, c, l, b };
+  }
+  function renderStateTable() {
+    const t = $('#stateTable'); t.textContent = '';
+    const card = cards[st.congress], o = other();
+    const thead = el('thead'), hr = el('tr');
+    for (const [h, n] of [['State'], ['Districts', 1], ['Pass county rule', 1], ['Pass line rule', 1], ['Pass both', 1], ['Split counties', 1]]) hr.appendChild(el('th', n ? { class: 'n' } : {}, h));
+    thead.appendChild(hr); t.appendChild(thead);
+    const tb = el('tbody');
+    for (const s of card.states) {
+      const a = stateStats(card, s.st), p = o ? stateStats(cards[o], s.st) : null;
+      const tr = el('tr', { 'data-st': s.st });
+      tr.appendChild(el('td', null, s.st));
+      tr.appendChild(el('td', { class: 'n' }, String(a.n)));
+      const cell = (v, pv) => {
+        const td = el('td', { class: 'n' }, v + ' / ' + a.n);
+        if (p && pv !== v) td.appendChild(el('div', { class: 'sub' }, ordinal(o) + ': ' + pv));
+        return td;
+      };
+      tr.appendChild(cell(a.c, p && p.c));
+      tr.appendChild(cell(a.l, p && p.l));
+      tr.appendChild(cell(a.b, p && p.b));
+      tr.appendChild(el('td', { class: 'n' }, s.split + ' of ' + s.cty));
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+  }
+  $('#stateTable').addEventListener('click', e => {
+    const tr = e.target.closest('tr[data-st]'); if (!tr) return;
+    const sec = document.getElementById('st-' + tr.dataset.st);
+    $('details', sec).open = true;
+    sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  // State sections
+  function chip(ok) { return el('span', { class: 'chip ' + (ok ? 'ok' : 'bad') }, ok ? 'Pass' : 'Fail'); }
+  function renderStates() {
+    const card = cards[st.congress], o = other();
+    for (const sec of $$('section.state')) {
+      const abbr = sec.dataset.st;
+      const a = stateStats(card, abbr);
+      $('.ssum', sec).textContent = a.n === 0 ? 'No data' :
+        a.n + (a.n === 1 ? ' district (at-large)' : ' districts') + ' · county ' + a.c + '/' + a.n + ' · line ' + a.l + '/' + a.n + ' · both ' + a.b + '/' + a.n;
+      for (const svg of $$('svg.map', sec)) {
+        const c = cards[svg.dataset.congress];
+        for (const p of $$('.dst path', svg)) p.setAttribute('class', status(c.byG.get(p.dataset.g)));
+        for (const g of $$('.wit g', svg)) {
+          const r = c.byG.get(g.dataset.g);
+          g.classList.toggle('on', st.view !== 'county' && !linePass(r, st.tol));
+        }
+      }
+      const det = $('details', sec);
+      if (det.open) renderDistrictTable(sec, a.rows, o);
+      else sec.dataset.stale = '1';
+    }
+  }
+  function renderDistrictTable(sec, rows, o) {
+    sec.dataset.stale = '';
+    const t = $('table.dt', sec); t.textContent = '';
+    const hr = el('tr');
+    const heads = [['District'], ['Whole counties', 1], ['Partial counties'], ['County rule'], ['Most other districts crossed', 1], ['Depth of 2nd crossing', 1], ['Line rule'], ['Worst line crosses']];
+    if (o) heads.push(['vs ' + ordinal(o)]);
+    for (const [h, n] of heads) hr.appendChild(el('th', n ? { class: 'n' } : {}, h));
+    const thead = el('thead'); thead.appendChild(hr); t.appendChild(thead);
+    const tb = el('tbody');
+    for (const r of rows) {
+      const lp = linePass(r, st.tol);
+      const tr = el('tr', { 'data-g': r.g });
+      tr.appendChild(el('td', null, r.l));
+      tr.appendChild(el('td', { class: 'n' }, String(r.w)));
+      tr.appendChild(el('td', null, r.pc ? r.pc + ': ' + r.pl : '—'));
+      const c1 = el('td'); c1.appendChild(chip(r.c)); tr.appendChild(c1);
+      tr.appendChild(el('td', { class: 'n' }, r.s > 0 || r.m > 0 ? String(r.m) : '—'));
+      tr.appendChild(el('td', { class: 'n' }, r.s > 0 ? fmtKm(r.s) : '—'));
+      const c2 = el('td'); c2.appendChild(chip(lp)); tr.appendChild(c2);
+      tr.appendChild(el('td', null, lp ? '' : r.x));
+      if (o) {
+        const p = cards[o].byG.get(r.g);
+        let txt = 'new district';
+        if (p) {
+          const ch = [];
+          if (p.c !== r.c) ch.push('county ' + (p.c ? 'pass' : 'fail') + ' → ' + (r.c ? 'pass' : 'fail'));
+          const plp = linePass(p, st.tol);
+          if (plp !== lp) ch.push('line ' + (plp ? 'pass' : 'fail') + ' → ' + (lp ? 'pass' : 'fail'));
+          txt = ch.length ? ch.join('; ') : 'no change';
+        }
+        tr.appendChild(el('td', { class: 'chg' }, txt));
+      }
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+  }
+  for (const sec of $$('section.state')) {
+    $('details', sec).addEventListener('toggle', e => {
+      if (e.target.open && sec.dataset.stale !== '') renderDistrictTable(sec, stateStats(cards[st.congress], sec.dataset.st).rows, other());
+    });
+    sec.dataset.stale = '1';
+  }
+  let allOpen = false;
+  $('#toggleAll').addEventListener('click', () => {
+    allOpen = !allOpen;
+    for (const d of $$('section.state details')) d.open = allOpen;
+    $('#toggleAll').textContent = allOpen ? 'Collapse all' : 'Expand all';
+  });
+
+  // Map tooltips
+  function districtTip(e, g, congress) {
+    const r = cards[congress].byG.get(g); if (!r) return;
+    const lp = linePass(r, st.tol);
+    showTip(e.clientX, e.clientY, tp => {
+      tp.appendChild(el('b', null, r.l + ' · ' + ordinal(congress) + ' Congress'));
+      tp.appendChild(el('div', { class: 'row' }, 'County rule: ' + (r.c ? 'pass' : 'fail') + ' (' + r.w + ' whole, ' + r.pc + ' partial' + (r.pc ? ': ' + r.pl : '') + ')'));
+      let line = 'Line rule: ' + (lp ? 'pass' : 'fail');
+      if (r.s > 0) line += ' (2nd crossing ' + fmtKm(r.s) + '; tolerance ' + fmtKm(st.tol) + ')';
+      tp.appendChild(el('div', { class: 'row' }, line));
+      if (!lp && r.x) tp.appendChild(el('div', { class: 'row' }, 'Worst line crosses ' + r.x));
+    });
+  }
+  document.addEventListener('pointermove', e => {
+    const p = e.target.closest && e.target.closest('.map .dst path');
+    if (p) districtTip(e, p.dataset.g, +p.closest('svg').dataset.congress);
+    else if (!e.target.closest || !e.target.closest('#tolChart')) hideTip();
+  });
+  document.addEventListener('pointerdown', e => {
+    const p = e.target.closest && e.target.closest('.map .dst path');
+    if (p && e.pointerType !== 'mouse') districtTip(e, p.dataset.g, +p.closest('svg').dataset.congress);
+  });
+
+  function render() {
+    document.body.dataset.congress = st.congress;
+    document.body.dataset.view = st.view;
+    for (const b of $$('#congressSeg button')) b.setAttribute('aria-pressed', String(+b.dataset.c === st.congress));
+    for (const b of $$('#viewSeg button')) b.setAttribute('aria-pressed', String(b.dataset.v === st.view));
+    $('#tolOut').textContent = fmtKm(st.tol);
+    mark.setAttribute('x1', X(st.tol)); mark.setAttribute('x2', X(st.tol));
+    renderLegend(); renderTiles(); renderStateTable(); renderStates();
+  }
+
+  // Method notes
+  const m = $('#method');
+  const c0 = DATA.cards[0];
+  const notes = [
+    ['Data', 'District shapes: Census Bureau cartographic boundary files (1:500,000) for the ' + congresses.map(ordinal).join(' and ') + ' Congresses. These are clipped to the shoreline, so open water is a neutral gap. County splits: Census district-to-county relationship tables, which give the exact land area of every piece of every county, built from census blocks. Counties are 2020 definitions, so Connecticut uses its eight historic counties. The 119th Congress files reflect maps in force in January 2025. Maps redrawn later are not included.'],
+    ['County rule', 'A county is split when its land lies in two or more districts; a piece of water alone doesn\'t count. Each district holding part of a split county includes it as a partial county. A district lying entirely inside one large county, such as one of the Los Angeles County districts, has exactly one partial county and passes. A district built entirely from whole counties has zero.'],
+    ['Line rule', 'Every pair of ' + c0.samples + ' sample points per district is tested. Points come from the convex hull, evenly along the true boundary, and spread through the interior: about ' + Math.round(c0.samples * (c0.samples - 1) / 2 / 1000) + ',000 segments per district. Each segment is first walked through a raster of the state (' + c0.resolution + ' cells along its longer side). Candidates are then confirmed by clipping the segment against the real district polygons. A segment crosses a district when it runs at least the tolerance inside it. The default tolerance of ' + fmtKm(base) + ' absorbs boundary noise. Points on a district\'s boundary count as inside it.'],
+    ['Depth of 2nd crossing', 'For each district, the deepest second crossing found over the tested segments: how far the worst line runs through the second of the other districts it crosses. A district fails at any tolerance below this depth, which is what the slider uses. With one or two districts in a state the rule can\'t fail, because there aren\'t two other districts to cross.'],
+    ['Limits', 'Sampling can miss a violation that only very specific point pairs would reveal, so a pass means "no violation found". In testing, raising the sample count from 500 to 1,000 changed the national pass count by at most one district. Fails are always confirmed against the true polygons.'],
+  ];
+  for (const [h, p] of notes) { m.appendChild(el('h3', null, h)); m.appendChild(el('p', null, p)); }
+
+  render();
+})();
+</script>
+</body>
+</html>
