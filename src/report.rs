@@ -157,7 +157,7 @@ fn rows_json(card: &Scorecard) -> Value {
     let states: Vec<Value> = card
         .states
         .iter()
-        .map(|s| json!({"st": s.state, "n": s.districts, "cty": s.counties, "split": s.split_counties, "extra": s.extra_county_pieces}))
+        .map(|s| json!({"st": s.state, "name": s.name, "n": s.districts, "cty": s.counties, "split": s.split_counties, "extra": s.extra_county_pieces}))
         .collect();
     json!({
         "congress": card.congress,
@@ -205,6 +205,7 @@ pub fn build(data: &Path, out: &Path) -> Result<PathBuf> {
     let counties = load::load_counties(&fetch::county_source(data))?;
     let counties_by_state = load::by_state(&counties);
 
+    // Keyed by full name so sections appear alphabetically.
     let mut states: BTreeMap<&str, String> = BTreeMap::new();
     let all_fp: BTreeMap<&str, ()> = geoms.iter().flatten().map(|f| (f.state_fp.as_str(), ())).collect();
     for fp in all_fp.keys() {
@@ -223,7 +224,7 @@ pub fn build(data: &Path, out: &Path) -> Result<PathBuf> {
             r#"<section class="state" id="st-{abbr}" data-st="{abbr}"><details><summary><span class="sname">{}</span><span class="ssum"></span></summary><div class="sbody"><div class="mapwrap">{maps}</div><div class="dtwrap"><table class="dt"></table></div></div></details></section>"#,
             state_name(fp)
         );
-        states.insert(abbr, section);
+        states.insert(state_name(fp), section);
     }
 
     let data_json = json!({

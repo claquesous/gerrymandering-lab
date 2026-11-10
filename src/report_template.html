@@ -434,7 +434,7 @@ code { font-size: 13px; }
     for (const s of card.states) {
       const a = stateStats(card, s.st), p = o ? stateStats(cards[o], s.st) : null;
       const tr = el('tr', { 'data-st': s.st });
-      tr.appendChild(el('td', null, s.st));
+      tr.appendChild(el('td', null, s.name));
       tr.appendChild(el('td', { class: 'n' }, String(a.n)));
       const cell = (v, pv) => {
         const td = el('td', { class: 'n' }, v + ' / ' + a.n);

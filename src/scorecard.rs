@@ -47,6 +47,7 @@ pub struct DistrictRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateRow {
     pub state: String,
+    pub name: String,
     pub districts: usize,
     pub county_pass: usize,
     pub line_pass: usize,
@@ -169,6 +170,7 @@ pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], p
             let sc: StateCounties = counties.states.get(st).cloned().unwrap_or_default();
             StateRow {
                 state: state_abbr(st).unwrap_or("??").to_string(),
+                name: load::state_name(st).to_string(),
                 districts: ds.len(),
                 county_pass: ds.iter().filter(|r| r.county_pass).count(),
                 line_pass: ds.iter().filter(|r| r.line_pass).count(),
@@ -179,7 +181,7 @@ pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], p
             }
         })
         .collect();
-    state_rows.sort_by(|a, b| a.state.cmp(&b.state));
+    state_rows.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(Scorecard {
         congress,
