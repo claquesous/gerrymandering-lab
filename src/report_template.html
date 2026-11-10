@@ -420,15 +420,15 @@ code { font-size: 13px; }
   // State table
   function stateStats(card, abbr) {
     const rows = card.rows.filter(r => r.l.startsWith(abbr + '-'));
-    let c = 0, l = 0, b = 0, one = 0;
-    for (const r of rows) { const lp = linePass(r, st.tol); c += r.c; l += lp; b += r.c && lp; one += r.c !== lp; }
-    return { rows, n: rows.length, c, l, b, one };
+    let c = 0, l = 0, b = 0, any = 0;
+    for (const r of rows) { const lp = linePass(r, st.tol); c += r.c; l += lp; b += r.c && lp; any += r.c || lp; }
+    return { rows, n: rows.length, c, l, b, any };
   }
   function renderStateTable() {
     const t = $('#stateTable'); t.textContent = '';
     const card = cards[st.congress], o = other();
     const thead = el('thead'), hr = el('tr');
-    for (const [h, n] of [['State'], ['Districts', 1], ['Pass county rule', 1], ['Pass line rule', 1], ['Pass one rule', 1], ['Pass both', 1], ['Split counties', 1]]) hr.appendChild(el('th', n ? { class: 'n' } : {}, h));
+    for (const [h, n] of [['State'], ['Districts', 1], ['Pass county rule', 1], ['Pass line rule', 1], ['Pass at least one', 1], ['Pass both', 1], ['Split counties', 1]]) hr.appendChild(el('th', n ? { class: 'n' } : {}, h));
     thead.appendChild(hr); t.appendChild(thead);
     const tb = el('tbody');
     for (const s of card.states) {
@@ -443,7 +443,7 @@ code { font-size: 13px; }
       };
       tr.appendChild(cell(a.c, p && p.c));
       tr.appendChild(cell(a.l, p && p.l));
-      tr.appendChild(cell(a.one, p && p.one));
+      tr.appendChild(cell(a.any, p && p.any));
       tr.appendChild(cell(a.b, p && p.b));
       tr.appendChild(el('td', { class: 'n' }, s.split + ' of ' + s.cty));
       tb.appendChild(tr);
