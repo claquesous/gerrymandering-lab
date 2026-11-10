@@ -50,7 +50,7 @@ The 119th Congress files reflect maps in force in January 2025. Maps redrawn aft
   4. Only confirmed crossings fail a district.
 - **Crossings are measured by depth, not length.** Depth is how far the line gets from the other district's border. A line between two points on one border, such as a county line that follows a parallel, can run for kilometers a few meters inside the neighbor, because parallels are slightly curved in the projection. That shouldn't count as crossing.
 - **County baseline:** `counties` applies the same rule to every county, with the other counties of its state in place of other districts. At 250 m, 58% of counties fail (mostly by under 2 km, along rivers and coastlines), against 89% of districts. At 5 km the figures are 4% and 41%.
-- `second_crossing_km` is the depth of the worst line's *second* crossing. A district fails at any tolerance below it, which is how the report's tolerance slider works without rerunning anything.
+- **Depth profile:** `crossing_depths_km` holds one entry per crossing count. Entry *n* is the deepest any tested line reaches into the *n*-th deepest other district it crosses. A district that may cross *k* other districts fails at tolerance *T* exactly when entry *k*+1 ≥ *T*. The report's "crossings allowed" and tolerance sliders work off this profile without rerunning anything. `second_crossing_km` is entry 2, the default rule. No line in any district crosses more than 7 other districts (AZ-2, CO-4, CO-7, IL-11).
 - `violating_pair_fraction` is the raster share of failing pairs, scaled by the share of that sample confirmed exactly.
 
 ## Layout

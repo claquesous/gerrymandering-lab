@@ -30,6 +30,10 @@ pub struct DistrictRow {
     /// How far (km) the worst segment reaches into the second-deepest other
     /// district it crosses; the line rule fails at or above `min_cross_m`.
     pub second_crossing_km: f64,
+    /// Space-separated depth profile (km): entry n is the deepest any line
+    /// reaches into the n-th deepest district it crosses. Allowing k
+    /// crossings at tolerance T fails exactly when entry k+1 >= T.
+    pub crossing_depths_km: String,
     /// Districts crossed by the worst confirmed segment and how deep it
     /// reaches into each, e.g. "MD-2 12.3km deep; MD-7 1.1km deep".
     pub witness_crossed: String,
@@ -60,8 +64,21 @@ pub struct Scorecard {
     pub min_cross_m: f64,
     pub districts: Vec<DistrictRow>,
     pub states: Vec<StateRow>,
-    /// Projected witness segments keyed by district GEOID, for the report.
-    pub witness_xy: HashMap<String, [[f64; 2]; 2]>,
+    /// For each district GEOID, entry n-1 is the line setting the n-th
+    /// crossing depth, for the report.
+    pub witnesses: HashMap<String, Vec<WitnessView>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WitnessView {
+    /// Endpoints in projected meters.
+    pub xy: [[f64; 2]; 2],
+    /// (district label, depth km) for each district crossed, deepest first.
+    pub crossed: Vec<(String, f64)>,
+}
+
+fn depths_km(l: &LineResult) -> String {
+    l.crossing_depths_m.iter().map(|d| format!("{:.3}", d / 1000.0)).collect::<Vec<_>>().join(" ")
 }
 
 pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], params: &Params) -> Result<Scorecard> {
@@ -87,7 +104,7 @@ pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], p
     }
 
     let mut rows = Vec::new();
-    let mut witness_xy = HashMap::new();
+    let mut witnesses = HashMap::new();
     for d in districts {
         let at_large = district_code(&d.geoid) == "00";
         let c: &DistrictCounties = counties
@@ -96,9 +113,17 @@ pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], p
             .ok_or_else(|| anyhow!("{} is missing from the county relationship file", d.geoid))?;
         let l = lines.get(&d.geoid);
         let line_pass = l.map_or(true, |l| l.pass);
-        let w = l.and_then(|l| l.witness.as_ref());
-        if let Some(w) = w {
-            witness_xy.insert(d.geoid.clone(), [w.from_xy, w.to_xy]);
+        let w = l.and_then(|l| l.witness());
+        if let Some(l) = l {
+            let views = l
+                .witnesses
+                .iter()
+                .map(|w| WitnessView {
+                    xy: [w.from_xy, w.to_xy],
+                    crossed: w.crossed.iter().map(|c| (district_label(&c.geoid), (c.depth_m / 10.0).round() / 100.0)).collect(),
+                })
+                .collect();
+            witnesses.insert(d.geoid.clone(), views);
         }
         rows.push(DistrictRow {
             geoid: d.geoid.clone(),
@@ -120,8 +145,14 @@ pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], p
             violating_pair_fraction: l.map_or(0.0, |l| l.violating_pair_fraction),
             pairs_tested: l.map_or(0, |l| l.pairs_tested),
             second_crossing_km: l.map_or(0.0, |l| l.second_crossing_m / 1000.0),
+            crossing_depths_km: l.map_or(String::new(), depths_km),
             witness_crossed: w.map_or(String::new(), |w| {
-                w.crossed.iter().map(|c| format!("{} {:.1}km deep", district_label(&c.geoid), c.depth_m / 1000.0)).collect::<Vec<_>>().join("; ")
+                w.crossed
+                    .iter()
+                    .filter(|c| c.depth_m >= params.min_cross_m)
+                    .map(|c| format!("{} {:.1}km deep", district_label(&c.geoid), c.depth_m / 1000.0))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             }),
             witness_from_lon: w.map(|w| w.from[0]),
             witness_from_lat: w.map(|w| w.from[1]),
@@ -157,7 +188,7 @@ pub fn build(congress: u32, districts: &[Feature], parts: &[load::CountyPart], p
         min_cross_m: params.min_cross_m,
         districts: rows,
         states: state_rows,
-        witness_xy,
+        witnesses,
     })
 }
 
@@ -192,6 +223,8 @@ pub struct CountyLineRow {
     pub line_pass: bool,
     pub max_other_crossed: usize,
     pub second_crossing_km: f64,
+    /// Depth profile, as in `DistrictRow::crossing_depths_km`.
+    pub crossing_depths_km: String,
     /// Counties crossed by the worst confirmed segment.
     pub witness_crossed: String,
     pub witness_from_lon: Option<f64>,
@@ -222,15 +255,21 @@ pub fn county_line_rule(data: &Path, out_dir: &Path, params: &Params) -> Result<
     let mut rows: Vec<CountyLineRow> = results
         .into_iter()
         .map(|(g, l)| {
-            let w = l.witness.as_ref();
+            let w = l.witness();
             CountyLineRow {
                 name: name(&g),
                 state: state_abbr(&g[..2]).unwrap_or("??").to_string(),
                 line_pass: l.pass,
                 max_other_crossed: l.max_other_crossed,
                 second_crossing_km: l.second_crossing_m / 1000.0,
+                crossing_depths_km: depths_km(&l),
                 witness_crossed: w.map_or(String::new(), |w| {
-                    w.crossed.iter().map(|c| format!("{} {:.1}km deep", name(&c.geoid), c.depth_m / 1000.0)).collect::<Vec<_>>().join("; ")
+                    w.crossed
+                        .iter()
+                        .filter(|c| c.depth_m >= params.min_cross_m)
+                        .map(|c| format!("{} {:.1}km deep", name(&c.geoid), c.depth_m / 1000.0))
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 }),
                 witness_from_lon: w.map(|w| w.from[0]),
                 witness_from_lat: w.map(|w| w.from[1]),

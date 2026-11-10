@@ -97,13 +97,17 @@ fn svg_map(view: &View, card: &Scorecard, districts: &[&Feature], counties: &[&F
     }
     s.push_str(r#"</g><g class="wit">"#);
     for d in districts {
-        if let Some([a, b]) = card.witness_xy.get(&d.geoid) {
+        // One line per crossing count; the page shows the one that matters
+        // for the current setting.
+        for (n, w) in card.witnesses.get(&d.geoid).into_iter().flatten().enumerate() {
+            let [a, b] = w.xy;
             let (x1, y1) = view.px(a[0], a[1]);
             let (x2, y2) = view.px(b[0], b[1]);
             let _ = write!(
                 s,
-                r#"<g data-g="{}"><line x1="{x1:.1}" y1="{y1:.1}" x2="{x2:.1}" y2="{y2:.1}"/><circle cx="{x1:.1}" cy="{y1:.1}" r="3"/><circle cx="{x2:.1}" cy="{y2:.1}" r="3"/></g>"#,
-                d.geoid
+                r#"<g data-g="{}" data-n="{}"><line x1="{x1:.1}" y1="{y1:.1}" x2="{x2:.1}" y2="{y2:.1}"/><circle cx="{x1:.1}" cy="{y1:.1}" r="3"/><circle cx="{x2:.1}" cy="{y2:.1}" r="3"/></g>"#,
+                d.geoid,
+                n + 1
             );
         }
     }
@@ -141,10 +145,11 @@ fn rows_json(card: &Scorecard) -> Value {
                 "w": r.whole_counties,
                 "pc": r.partial_counties,
                 "pl": r.partial_county_list,
-                // Crossing depth that decides the line rule; 0 for single-district states.
-                "s": (r.second_crossing_km * 1000.0).round() / 1000.0,
-                "m": r.max_other_crossed,
-                "x": r.witness_crossed,
+                // Depth profile (km) that decides the line rule for any
+                // number of allowed crossings; empty for single-district states.
+                "d": parse_depths(&r.crossing_depths_km),
+                // For each crossing count, the districts its worst line crosses.
+                "wx": card.witnesses.get(&r.geoid).map(|ws| ws.iter().map(|w| &w.crossed).collect::<Vec<_>>()),
                 "f": (r.violating_pair_fraction * 10000.0).round() / 10000.0,
             })
         })
@@ -164,20 +169,28 @@ fn rows_json(card: &Scorecard) -> Value {
     })
 }
 
-/// Second-crossing depths (km) from `counties`, if it has been run, for the
+/// Crossing depth profiles (km) from `counties`, if it has been run, for the
 /// county baseline on the tolerance chart.
-fn county_depths(out: &Path) -> Result<Option<Vec<f64>>> {
+fn county_depths(out: &Path) -> Result<Option<Vec<Vec<f64>>>> {
     let path = out.join("county_line_rule.csv");
     if !path.exists() {
         return Ok(None);
     }
     let mut rdr = csv::Reader::from_path(path)?;
-    let col = rdr.headers()?.iter().position(|h| h == "second_crossing_km").ok_or_else(|| anyhow::anyhow!("county_line_rule.csv: no second_crossing_km column"))?;
+    let col = rdr
+        .headers()?
+        .iter()
+        .position(|h| h == "crossing_depths_km")
+        .ok_or_else(|| anyhow::anyhow!("county_line_rule.csv is from an older version; rerun `counties`"))?;
     let mut v = Vec::new();
     for row in rdr.records() {
-        v.push((row?[col].parse::<f64>()? * 1000.0).round() / 1000.0);
+        v.push(parse_depths(&row?[col]));
     }
     Ok(Some(v))
+}
+
+fn parse_depths(s: &str) -> Vec<f64> {
+    s.split_whitespace().filter_map(|x| x.parse::<f64>().ok()).map(|x| (x * 1000.0).round() / 1000.0).collect()
 }
 
 pub fn build(data: &Path, out: &Path) -> Result<PathBuf> {

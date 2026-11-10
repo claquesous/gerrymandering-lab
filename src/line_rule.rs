@@ -8,10 +8,15 @@
 //!    hull, where violations tend to be) and in its interior. Walk every pair
 //!    through a raster of the state and note which other districts the
 //!    segment may reach at least `min_cross_m` into.
-//! 2. Confirm: re-check the worst candidates, plus an even spread of the
-//!    rest, by clipping the segment against the real polygons. Only confirmed
-//!    crossings decide pass/fail. The confirmed share of the sample scales
-//!    the violating-pair fraction.
+//! 2. Confirm: for each number of districts crossed, re-check the pairs
+//!    that look worst on the raster, plus a uniform sample of violating
+//!    pairs, by clipping the segment against the real polygons. Only
+//!    confirmed crossings decide pass/fail. The confirmed share of the
+//!    sample scales the violating-pair fraction.
+//!
+//! The result is a depth profile per district (`crossing_depths_m`), so the
+//! rule can be re-evaluated for any number of allowed crossings and any
+//! tolerance without rerunning the search.
 //!
 //! A crossing is measured by its *depth*: how far the segment gets from the
 //! other district's border while inside it. Length would be wrong: a line
@@ -67,18 +72,40 @@ pub struct Crossing {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LineResult {
+    /// Passes the rule as configured: no line crosses two or more other
+    /// districts by at least `min_cross_m`.
     pub pass: bool,
-    /// The most other districts any tested segment crosses (confirmed).
+    /// The most other districts one tested line crosses by `min_cross_m`.
     pub max_other_crossed: usize,
-    /// Over the segments checked exactly, how far the worst segment reaches
-    /// into the *second*-deepest other district it crosses. The district fails when this is at
-    /// least `min_cross_m`, so it shows how close to the line a district is.
+    /// `crossing_depths_m[1]`, kept as its own field for the CSV.
     pub second_crossing_m: f64,
+    /// Entry n-1 is the deepest any tested line reaches into the n-th
+    /// deepest district it crosses. A district fails "at most k other
+    /// districts" at tolerance T exactly when entry k is at least T. Never
+    /// increases with n; trailing zeros are dropped.
+    pub crossing_depths_m: Vec<f64>,
     /// Estimated share of point pairs whose segment breaks the rule.
     pub violating_pair_fraction: f64,
     pub pairs_tested: usize,
-    pub witness: Option<Witness>,
+    /// Entry n-1 is the line that sets `crossing_depths_m[n-1]`.
+    pub witnesses: Vec<Witness>,
 }
+
+impl LineResult {
+    /// The line that breaks the rule as configured, if any.
+    pub fn witness(&self) -> Option<&Witness> {
+        if self.pass {
+            None
+        } else {
+            self.witnesses.get(1)
+        }
+    }
+}
+
+/// Most crossings tracked per line (and the length of `crossing_depths_m`).
+const MAX_CROSSINGS: usize = 16;
+/// Pairs per crossing count re-checked against the real polygons.
+const TOP_PER_COUNT: usize = 6;
 
 /// Scores every district of one state. `districts` must all be in the same
 /// state. Any polygons work, so this also scores counties.
@@ -101,97 +128,109 @@ fn score_district(k: usize, districts: &[&Feature], raster: &Raster, proj: &Albe
     let unit = DEPTH_UNIT as f64;
     let min_run = ((unit * (params.min_cross_m / raster.cell - 1.0)).floor() as u32).max(DEPTH_UNIT as u32);
 
-    // Stage 1: raster search. Keep pairs that run through two or more other
-    // districts, with the raster depth of the second-deepest crossing.
-    let mut candidates: Vec<(u32, u32, Vec<u16>, u32)> = Vec::new();
+    // Stage 1: raster search. For each n, keep the few pairs whose n-th
+    // deepest crossing is deepest on the raster. Also keep an even sample
+    // of pairs crossing two or more districts, to estimate the violating
+    // fraction.
+    let mut top: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); MAX_CROSSINGS]; // (depth, i, j)
+    let mut violating = 0usize;
+    let mut sample: Vec<(u32, u32)> = Vec::new();
+    let sample_max = params.confirm;
+    let mut rng: u64 = 0x9e37_79b9_7f4a_7c15 ^ k as u64;
     let mut pairs = 0usize;
     for i in 0..pts.len() {
         for j in i + 1..pts.len() {
             pairs += 1;
             let t = raster_crossings(raster, pts[i], pts[j], k as u16);
-            if t.qualifying(min_run).nth(1).is_some() {
-                candidates.push((i as u32, j as u32, t.qualifying(min_run).collect(), t.second()));
+            let (depths, n) = t.sorted_depths(min_run);
+            if n >= 2 {
+                violating += 1;
+                // Reservoir sampling, so the sample is uniform over all
+                // violating pairs.
+                if sample.len() < sample_max {
+                    sample.push((i as u32, j as u32));
+                } else {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    let r = (rng % violating as u64) as usize;
+                    if r < sample_max {
+                        sample[r] = (i as u32, j as u32);
+                    }
+                }
+            }
+            for (slot, &d) in top.iter_mut().zip(&depths[..n.min(MAX_CROSSINGS)]) {
+                if slot.len() < TOP_PER_COUNT {
+                    slot.push((d, i as u32, j as u32));
+                } else if let Some(m) = (0..slot.len()).min_by_key(|&x| slot[x].0).filter(|&m| slot[m].0 < d) {
+                    slot[m] = (d, i as u32, j as u32);
+                }
             }
         }
     }
 
-    // Stage 2: exact check of the worst candidates, plus an even spread to
-    // estimate how many raster candidates are real.
-    // Worst by districts crossed, and worst by depth of the second crossing
-    // (which sets `second_crossing_m`).
-    let mut by_count: Vec<usize> = (0..candidates.len()).collect();
-    by_count.sort_by_key(|&c| std::cmp::Reverse((candidates[c].2.len(), candidates[c].3)));
-    let mut by_depth = by_count.clone();
-    by_depth.sort_by_key(|&c| std::cmp::Reverse(candidates[c].3));
-    let mut chosen: Vec<usize> = by_count.into_iter().take(params.confirm / 4).collect();
-    chosen.extend(by_depth.into_iter().take(params.confirm / 4));
-    let spread: Vec<usize> = if candidates.is_empty() {
-        vec![]
-    } else {
-        let n = (params.confirm - chosen.len()).min(candidates.len());
-        (0..n).map(|s| s * candidates.len() / n).collect()
-    };
-    let mut exact: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
-    for &c in chosen.iter().chain(&spread) {
-        let (i, j, ref ids, _) = candidates[c];
-        exact.entry(c).or_insert_with(|| exact_crossings(pts[i as usize], pts[j as usize], ids, districts, params.min_cross_m / 2.0));
+    // Stage 2: exact depths for every kept pair.
+    let mut exact: HashMap<(u32, u32), Vec<(usize, f64)>> = HashMap::new();
+    let floor = params.min_cross_m / 2.0;
+    for (i, j) in top.iter().flatten().map(|&(_, i, j)| (i, j)).chain(sample.iter().copied()) {
+        exact.entry((i, j)).or_insert_with(|| {
+            let (a, b) = (pts[i as usize], pts[j as usize]);
+            let ids: Vec<u16> = raster_crossings(raster, a, b, k as u16).qualifying(min_run).collect();
+            exact_crossings(a, b, &ids, districts, floor)
+        });
     }
-    let confirmed = |c: &Vec<(usize, f64)>| c.iter().filter(|(_, len)| *len >= params.min_cross_m).count();
-    let second = |c: &Vec<(usize, f64)>| c.get(1).map_or(0.0, |(_, len)| *len);
-    let spread_confirmed = spread.iter().filter(|c| confirmed(&exact[c]) >= 2).count();
-    let second_crossing_m = exact.values().map(second).fold(0.0, f64::max);
 
-    // The witness is the violating segment with the deepest second crossing,
-    // so it still demonstrates a failure at any tolerance below
-    // `second_crossing_m`.
-    let mut best: Option<(f64, usize)> = None; // (second depth, candidate)
-    let mut max_count = 0;
-    for (&c, crossings) in &exact {
-        let n = confirmed(crossings);
-        if n >= 2 {
-            max_count = max_count.max(n);
-            if best.map_or(true, |(bd, _)| second(crossings) > bd) {
-                best = Some((second(crossings), c));
+    // Best depth for each crossing count, and the pair that sets it.
+    let mut best: Vec<(f64, Option<(u32, u32)>)> = vec![(0.0, None); MAX_CROSSINGS];
+    for (&pair, crossings) in &exact {
+        for (n, &(_, depth)) in crossings.iter().take(MAX_CROSSINGS).enumerate() {
+            if depth > best[n].0 {
+                best[n] = (depth, Some(pair));
             }
         }
     }
+    while best.last().is_some_and(|b| b.0 <= 0.0) {
+        best.pop();
+    }
 
-    let raw_fraction = candidates.len() as f64 / pairs.max(1) as f64;
-    let rate = if spread.is_empty() { 0.0 } else { spread_confirmed as f64 / spread.len() as f64 };
-    match best {
-        Some((_, c)) => {
-            let (i, j) = (candidates[c].0, candidates[c].1);
+    let witnesses: Vec<Witness> = best
+        .iter()
+        .filter_map(|(_, pair)| *pair)
+        .map(|(i, j)| {
             let (a, b) = (pts[i as usize], pts[j as usize]);
             let (alon, alat) = proj.inverse(a.x, a.y);
             let (blon, blat) = proj.inverse(b.x, b.y);
-            LineResult {
-                pass: false,
-                max_other_crossed: max_count,
-                second_crossing_m,
-                // At least one confirmed violation, even if the spread found none.
-                violating_pair_fraction: (raw_fraction * rate).max(1.0 / pairs as f64),
-                pairs_tested: pairs,
-                witness: Some(Witness {
-                    from: [alon, alat],
-                    to: [blon, blat],
-                    from_xy: [a.x, a.y],
-                    to_xy: [b.x, b.y],
-                    crossed: exact[&c]
-                        .iter()
-                        .filter(|(_, len)| *len >= params.min_cross_m)
-                        .map(|&(d, depth)| Crossing { geoid: districts[d].geoid.clone(), depth_m: depth })
-                        .collect(),
-                }),
+            Witness {
+                from: [alon, alat],
+                to: [blon, blat],
+                from_xy: [a.x, a.y],
+                to_xy: [b.x, b.y],
+                crossed: exact[&(i, j)]
+                    .iter()
+                    .filter(|(_, depth)| *depth > 0.0)
+                    .map(|&(d, depth)| Crossing { geoid: districts[d].geoid.clone(), depth_m: depth })
+                    .collect(),
             }
-        }
-        None => LineResult {
-            pass: true,
-            max_other_crossed: max_single_crossing(&pts, raster, k as u16, min_run),
-            second_crossing_m,
-            violating_pair_fraction: 0.0,
-            pairs_tested: pairs,
-            witness: None,
-        },
+        })
+        .collect();
+    let depths: Vec<f64> = best.iter().map(|b| b.0).collect();
+    let second = depths.get(1).copied().unwrap_or(0.0);
+    let pass = second < params.min_cross_m;
+
+    let confirmed = |c: &Vec<(usize, f64)>| c.iter().filter(|(_, depth)| *depth >= params.min_cross_m).count();
+    let sample_confirmed = sample.iter().filter(|&&p| confirmed(&exact[&p]) >= 2).count();
+    let rate = if sample.is_empty() { 0.0 } else { sample_confirmed as f64 / sample.len() as f64 };
+    let raw_fraction = violating as f64 / pairs.max(1) as f64;
+    LineResult {
+        pass,
+        max_other_crossed: depths.iter().filter(|&&d| d >= params.min_cross_m).count(),
+        second_crossing_m: second,
+        // A failing district has at least one violating pair, even if the
+        // sample found none.
+        violating_pair_fraction: if pass { 0.0 } else { (raw_fraction * rate).max(1.0 / pairs as f64) },
+        pairs_tested: pairs,
+        crossing_depths_m: depths,
+        witnesses,
     }
 }
 
@@ -212,18 +251,19 @@ impl Tally {
         (0..self.len).filter(move |&i| self.depth[i] >= min_depth).map(|i| self.ids[i])
     }
 
-    /// Raster depth of the second-deepest crossing.
-    fn second(&self) -> u32 {
-        let (mut top, mut second) = (0, 0);
-        for &n in &self.depth[..self.len] {
-            if n > top {
-                second = top;
-                top = n;
-            } else if n > second {
-                second = n;
+    /// Raster depths of the qualifying crossings, deepest first, and how
+    /// many there are.
+    fn sorted_depths(&self, min_depth: u32) -> ([u32; TALLY_MAX], usize) {
+        let mut out = [0u32; TALLY_MAX];
+        let mut n = 0;
+        for &d in &self.depth[..self.len] {
+            if d >= min_depth {
+                out[n] = d;
+                n += 1;
             }
         }
-        second
+        out[..n].sort_unstable_by(|a, b| b.cmp(a));
+        (out, n)
     }
 }
 
@@ -302,20 +342,6 @@ fn distance_to_border(geom: &MultiPolygon<f64>, p: Coord<f64>) -> f64 {
         }
     }
     best.sqrt()
-}
-
-/// For a passing district: 1 if any sampled segment crosses another
-/// district, else 0. Computed on the raster only.
-fn max_single_crossing(pts: &[Coord<f64>], raster: &Raster, own: u16, min_run: u32) -> usize {
-    let step = (pts.len() / 60).max(1);
-    for i in (0..pts.len()).step_by(step) {
-        for j in (i + 1..pts.len()).step_by(step) {
-            if raster_crossings(raster, pts[i], pts[j], own).qualifying(min_run).next().is_some() {
-                return 1;
-            }
-        }
-    }
-    0
 }
 
 /// Up to `n` points of the district: its convex-hull vertices, points spaced
@@ -430,11 +456,14 @@ mod tests {
         let u = &results.iter().find(|(id, _)| id == "9901").unwrap().1;
         assert!(!u.pass);
         assert_eq!(u.max_other_crossed, 2);
-        let w = u.witness.as_ref().unwrap();
+        let w = u.witness().unwrap();
         let mut ids: Vec<&str> = w.crossed.iter().map(|c| c.geoid.as_str()).collect();
         ids.sort();
         assert_eq!(ids, ["9902", "9903"]);
         assert!(u.second_crossing_m >= 250.0);
+        // Depths never increase with the number of districts crossed.
+        assert!(u.crossing_depths_m.windows(2).all(|w| w[0] >= w[1]));
+        assert_eq!(u.witnesses.len(), u.crossing_depths_m.len());
         assert!(u.violating_pair_fraction > 0.0);
         for id in ["9902", "9903"] {
             assert!(results.iter().find(|(i, _)| i == id).unwrap().1.pass);
@@ -469,5 +498,6 @@ mod tests {
         let l = &results[0].1;
         assert!(l.pass);
         assert_eq!(l.max_other_crossed, 1);
+        assert_eq!(l.crossing_depths_m.len(), 1);
     }
 }
