@@ -1,4 +1,4 @@
-# District Rule Scorecard
+# District Gerrymandering Scorecard
 
 Scores existing US congressional districts against two anti-gerrymandering rules:
 
