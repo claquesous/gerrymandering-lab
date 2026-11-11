@@ -89,8 +89,8 @@ p.lede { color: var(--ink-2); margin: 0; max-width: 72ch; }
 .seg button + button { border-left: 1px solid var(--border); }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
 input[type=range] { width: 160px; accent-color: var(--ink); }
-#tolOut, #kOut { font-variant-numeric: tabular-nums; font-size: 13px; min-width: 56px; }
-#kSlider { width: 120px; }
+#tolOut, #kOut, #pkOut { font-variant-numeric: tabular-nums; font-size: 13px; min-width: 56px; }
+#kSlider, #pkSlider { width: 120px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
 .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
 .legend .wl { width: 18px; height: 0; border-top: 2px solid var(--ink); border-radius: 0; vertical-align: 3px; }
@@ -189,7 +189,7 @@ code { font-size: 13px; }
     <h1>Congressional District Rule Scorecard</h1>
     <p class="lede">How today's House districts would fare under two simple anti-gerrymandering rules. Districts are scored as drawn; no new maps are proposed.</p>
     <div class="rules">
-      <div class="rule"><b>County rule</b><span>A district may include at most one partial county, meaning a county whose land is split with another district.</span></div>
+      <div class="rule"><b>County rule</b><span>A district may include at most a set number of partial counties, meaning counties whose land is split with another district: one by default, adjustable below.</span></div>
       <div class="rule"><b>Line rule</b><span>A straight line between any two points in a district may cross at most a set number of other districts in the same state: one by default, adjustable below. Water and other states don't count.</span></div>
     </div>
   </header>
@@ -199,6 +199,7 @@ code { font-size: 13px; }
     <div class="ctl"><span class="lab">Color by</span><div class="seg" id="viewSeg">
       <button data-v="both" aria-pressed="true">Both rules</button><button data-v="county" aria-pressed="false">County rule</button><button data-v="line" aria-pressed="false">Line rule</button>
     </div></div>
+    <div class="ctl"><label for="pkSlider">Partial counties allowed</label><input type="range" id="pkSlider" min="0" max="14" step="1" value="1"><span id="pkOut"></span></div>
     <div class="ctl"><label for="kSlider">Crossings allowed</label><input type="range" id="kSlider" min="0" max="7" step="1" value="1"><span id="kOut"></span></div>
     <div class="ctl"><label for="tol">Line tolerance</label><input type="range" id="tol" min="0" max="10" step="1" value="0"><span id="tolOut"></span></div>
     <div class="legend" id="legend" aria-live="polite"></div>
@@ -238,7 +239,10 @@ code { font-size: 13px; }
   const congresses = DATA.cards.map(c => c.congress);
   const base = DATA.cards[0].min_cross_km;
   const TOLS = [base, 0.5, 1, 2, 3, 5, 10, 15, 25, 50, 100].filter((t, i) => i === 0 || t > base);
-  const st = { congress: congresses[0], view: 'both', tol: TOLS[0], k: 1 };
+  const st = { congress: congresses[0], view: 'both', tol: TOLS[0], k: 1, pk: 1 };
+  // Most partial counties in any district; at that setting every district passes.
+  const maxPk = Math.max(1, ...DATA.cards.flatMap(c => c.rows.map(r => r.pc)));
+  const countyPass = r => r.pc <= st.pk;
   // Highest crossing count any line reaches, so the slider stops where
   // every district passes.
   const maxN = Math.max(1, ...DATA.cards.flatMap(c => c.rows.map(r => r.d.length)), ...(DATA.county_depths || []).map(d => d.length));
@@ -262,7 +266,7 @@ code { font-size: 13px; }
   const other = () => congresses.find(c => c !== st.congress);
 
   function status(r) {
-    const c = r.c, l = linePass(r, st.tol);
+    const c = countyPass(r), l = linePass(r, st.tol);
     if (st.view === 'county') return c ? 'ok' : 'bad';
     if (st.view === 'line') return l ? 'ok' : 'bad';
     return c && l ? 'ok' : (c || l ? 'warn' : 'bad');
@@ -271,7 +275,8 @@ code { font-size: 13px; }
     let c = 0, l = 0, b = 0;
     for (const r of card.rows) {
       const lp = linePass(r, T);
-      c += r.c; l += lp; b += r.c && lp;
+      const cp = countyPass(r);
+      c += cp; l += lp; b += cp && lp;
     }
     return { n: card.rows.length, c, l, b };
   }
@@ -296,6 +301,9 @@ code { font-size: 13px; }
   const kSlider = $('#kSlider');
   kSlider.max = maxN;
   kSlider.addEventListener('input', () => { st.k = +kSlider.value; render(); });
+  const pkSlider = $('#pkSlider');
+  pkSlider.max = maxPk;
+  pkSlider.addEventListener('input', () => { st.pk = +pkSlider.value; render(); });
 
   function renderLegend() {
     const L = $('#legend'); L.textContent = '';
@@ -422,7 +430,7 @@ code { font-size: 13px; }
   function stateStats(card, abbr) {
     const rows = card.rows.filter(r => r.l.startsWith(abbr + '-'));
     let c = 0, l = 0, b = 0, any = 0;
-    for (const r of rows) { const lp = linePass(r, st.tol); c += r.c; l += lp; b += r.c && lp; any += r.c || lp; }
+    for (const r of rows) { const lp = linePass(r, st.tol), cp = countyPass(r); c += cp; l += lp; b += cp && lp; any += cp || lp; }
     return { rows, n: rows.length, c, l, b, any };
   }
   function renderStateTable() {
@@ -495,7 +503,7 @@ code { font-size: 13px; }
       tr.appendChild(el('td', null, r.l));
       tr.appendChild(el('td', { class: 'n' }, String(r.w)));
       tr.appendChild(el('td', null, r.pc ? r.pc + ': ' + r.pl : '—'));
-      const c1 = el('td'); c1.appendChild(chip(r.c)); tr.appendChild(c1);
+      const c1 = el('td'); c1.appendChild(chip(countyPass(r))); tr.appendChild(c1);
       const dk = depthAt(r.d, st.k + 1);
       tr.appendChild(el('td', { class: 'n' }, r.d.length ? String(crossedAt(r, st.tol)) : '—'));
       tr.appendChild(el('td', { class: 'n' }, dk > 0 ? fmtKm(dk) : '—'));
@@ -506,7 +514,8 @@ code { font-size: 13px; }
         let txt = 'new district';
         if (p) {
           const ch = [];
-          if (p.c !== r.c) ch.push('county ' + (p.c ? 'pass' : 'fail') + ' → ' + (r.c ? 'pass' : 'fail'));
+          const pcp = countyPass(p), rcp = countyPass(r);
+          if (pcp !== rcp) ch.push('county ' + (pcp ? 'pass' : 'fail') + ' → ' + (rcp ? 'pass' : 'fail'));
           const plp = linePass(p, st.tol);
           if (plp !== lp) ch.push('line ' + (plp ? 'pass' : 'fail') + ' → ' + (lp ? 'pass' : 'fail'));
           txt = ch.length ? ch.join('; ') : 'no change';
@@ -536,7 +545,7 @@ code { font-size: 13px; }
     const lp = linePass(r, st.tol);
     showTip(e.clientX, e.clientY, tp => {
       tp.appendChild(el('b', null, r.l + ' · ' + ordinal(congress) + ' Congress'));
-      tp.appendChild(el('div', { class: 'row' }, 'County rule: ' + (r.c ? 'pass' : 'fail') + ' (' + r.w + ' whole, ' + r.pc + ' partial' + (r.pc ? ': ' + r.pl : '') + ')'));
+      tp.appendChild(el('div', { class: 'row' }, 'County rule: ' + (countyPass(r) ? 'pass' : 'fail') + ' (' + r.w + ' whole, ' + r.pc + ' partial' + (r.pc ? ': ' + r.pl : '') + '; ' + st.pk + ' allowed)'));
       let line = 'Line rule: ' + (lp ? 'pass' : 'fail');
       const dk = depthAt(r.d, st.k + 1);
       if (r.d.length) line += ' (most crossed by one line: ' + crossedAt(r, st.tol) + '; crossing #' + (st.k + 1) + ' reaches ' + (dk > 0 ? fmtKm(dk) : '0 m') + ', tolerance ' + fmtKm(st.tol) + ')';
@@ -561,6 +570,7 @@ code { font-size: 13px; }
     for (const b of $$('#viewSeg button')) b.setAttribute('aria-pressed', String(b.dataset.v === st.view));
     $('#tolOut').textContent = fmtKm(st.tol);
     $('#kOut').textContent = String(st.k);
+    $('#pkOut').textContent = String(st.pk);
     updateChart();
     mark.setAttribute('x1', X(st.tol)); mark.setAttribute('x2', X(st.tol));
     renderLegend(); renderTiles(); renderStateTable(); renderStates();
@@ -571,7 +581,7 @@ code { font-size: 13px; }
   const c0 = DATA.cards[0];
   const notes = [
     ['Data', 'District shapes: Census Bureau cartographic boundary files (1:500,000) for the ' + congresses.map(ordinal).join(' and ') + ' Congresses. These are clipped to the shoreline, so open water is a neutral gap. County splits: Census district-to-county relationship tables, which give the exact land area of every piece of every county, built from census blocks. Counties are 2020 definitions, so Connecticut uses its eight historic counties. The 119th Congress files reflect maps in force in January 2025. Maps redrawn later are not included.'],
-    ['County rule', 'A county is split when its land lies in two or more districts; a piece of water alone doesn\'t count. Each district holding part of a split county includes it as a partial county. A district lying entirely inside one large county, such as one of the Los Angeles County districts, has exactly one partial county and passes. A district built entirely from whole counties has zero.'],
+    ['County rule', 'A county is split when its land lies in two or more districts; a piece of water alone doesn\'t count. Each district holding part of a split county includes it as a partial county. A district lying entirely inside one large county, such as one of the Los Angeles County districts, has exactly one partial county. A district built entirely from whole counties has zero. The partial-counties slider sets how many a district may include; at ' + maxPk + ', the most in any district, every district passes.'],
     ['Line rule', 'Every pair of ' + c0.samples + ' sample points per district is tested. Points come from the convex hull, evenly along the true boundary, and spread through the interior: about ' + Math.round(c0.samples * (c0.samples - 1) / 2 / 1000) + ',000 segments per district. Each segment is first walked through a raster of the state (' + c0.resolution + ' cells along its longer side). Candidates are then confirmed by clipping the segment against the real district polygons. A segment crosses a district when it reaches at least the tolerance into it, measured as distance from that district\'s border. Measuring depth rather than length matters: a line between two points on one border can run for kilometers a few meters inside the neighbor, and that shouldn\'t count. The default tolerance of ' + fmtKm(base) + ' absorbs boundary noise. Points on a district\'s boundary count as inside it.'],
     ['Crossings allowed and depth', 'For each district the scorer keeps a depth profile. Entry n is the deepest any tested line reaches into the n-th deepest other district it crosses, and the line that sets it. A district allowed k crossings fails at any tolerance below entry k+1, so both sliders re-score every district instantly. The slider stops at ' + maxN + ', the most other districts any line crosses. With k other districts allowed, a state needs more than k+1 districts before the rule can fail.'],
     ['County baseline', 'Counties are scored by the same line rule, with the other counties of the same state in place of other districts. Counties weren\'t drawn for elections, so their pass rate shows how much of a failure comes from ordinary irregular borders such as rivers and coastlines.'],
