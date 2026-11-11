@@ -4,7 +4,7 @@
 //! a small inline script (`report_template.html`) over the embedded data.
 
 use crate::fetch;
-use crate::load::{self, district_code, state_abbr, state_name, Feature};
+use crate::load::{self, district_code, district_label, state_abbr, state_name, Feature};
 use crate::scorecard::{self, Scorecard};
 use anyhow::{bail, Result};
 use geo::{BoundingRect, InteriorPoint, MultiPolygon, Simplify};
@@ -21,25 +21,96 @@ const SIMPLIFY_PX: f64 = 0.6;
 
 struct View {
     xmin: f64,
+    ymin: f64,
+    xmax: f64,
     ymax: f64,
     scale: f64,
     w: f64,
     h: f64,
+    /// Polygons left outside the frame, as (district GEOID, count).
+    omitted: Vec<(String, usize)>,
+}
+
+/// A remote island is left off a map only if including it would make the
+/// map's longer side this many times longer.
+const CROP_RATIO: f64 = 1.5;
+/// Share of land area that always sets the frame.
+const CORE_SHARE: f64 = 0.99;
+/// How much a polygon outside the core may stretch the frame and still be
+/// shown.
+const STRETCH: f64 = 1.15;
+
+#[derive(Clone, Copy)]
+struct Bounds(f64, f64, f64, f64);
+
+impl Bounds {
+    const EMPTY: Bounds = Bounds(f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    fn add(self, r: geo::Rect<f64>) -> Bounds {
+        Bounds(self.0.min(r.min().x), self.1.min(r.min().y), self.2.max(r.max().x), self.3.max(r.max().y))
+    }
+    fn side(self) -> f64 {
+        (self.2 - self.0).max(self.3 - self.1)
+    }
+    fn contains(self, r: geo::Rect<f64>) -> bool {
+        r.min().x >= self.0 && r.min().y >= self.1 && r.max().x <= self.2 && r.max().y <= self.3
+    }
 }
 
 impl View {
+    /// Frames the features, leaving out remote specks such as the
+    /// Northwestern Hawaiian Islands when they would shrink the rest.
     fn fit(features: &[&Feature]) -> View {
-        let (mut xmin, mut ymin, mut xmax, mut ymax) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-        for f in features {
-            if let Some(r) = f.geom.bounding_rect() {
-                xmin = xmin.min(r.min().x);
-                ymin = ymin.min(r.min().y);
-                xmax = xmax.max(r.max().x);
-                ymax = ymax.max(r.max().y);
+        use geo::Area;
+        let mut polys: Vec<(&str, f64, geo::Rect<f64>)> = features
+            .iter()
+            .flat_map(|f| f.geom.0.iter().filter_map(move |p| Some((f.geoid.as_str(), p.unsigned_area(), p.bounding_rect()?))))
+            .collect();
+        polys.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let full = polys.iter().fold(Bounds::EMPTY, |b, p| b.add(p.2));
+
+        // The largest polygons covering CORE_SHARE of the area set the core
+        // frame; anything that stretches it only a little joins it.
+        let total: f64 = polys.iter().map(|p| p.1).sum();
+        let (mut core, mut acc) = (Bounds::EMPTY, 0.0);
+        let mut rest = Vec::new();
+        for p in &polys {
+            if acc < CORE_SHARE * total {
+                core = core.add(p.2);
+                acc += p.1;
+            } else {
+                rest.push(p);
             }
         }
-        let scale = MAP_PX / (xmax - xmin).max(ymax - ymin);
-        View { xmin, ymax, scale, w: (xmax - xmin) * scale, h: (ymax - ymin) * scale }
+        let limit = core.side() * STRETCH;
+        for p in &rest {
+            if core.add(p.2).side() <= limit {
+                core = core.add(p.2);
+            }
+        }
+        let frame = if full.side() > CROP_RATIO * core.side() { core } else { full };
+
+        let mut omitted: BTreeMap<String, usize> = BTreeMap::new();
+        for p in &polys {
+            if !frame.contains(p.2) {
+                *omitted.entry(p.0.to_string()).or_default() += 1;
+            }
+        }
+        let scale = MAP_PX / frame.side();
+        View {
+            xmin: frame.0,
+            ymin: frame.1,
+            xmax: frame.2,
+            ymax: frame.3,
+            scale,
+            w: (frame.2 - frame.0) * scale,
+            h: (frame.3 - frame.1) * scale,
+            omitted: omitted.into_iter().collect(),
+        }
+    }
+
+    /// True if the polygon lies entirely outside the frame.
+    fn outside(&self, r: geo::Rect<f64>) -> bool {
+        r.max().x < self.xmin || r.min().x > self.xmax || r.max().y < self.ymin || r.min().y > self.ymax
     }
 
     fn px(&self, x: f64, y: f64) -> (f64, f64) {
@@ -50,6 +121,9 @@ impl View {
         let simple: MultiPolygon<f64> = geom.simplify(SIMPLIFY_PX / self.scale);
         let mut d = String::new();
         for poly in &simple.0 {
+            if poly.bounding_rect().is_some_and(|r| self.outside(r)) {
+                continue;
+            }
             for ring in std::iter::once(poly.exterior()).chain(poly.interiors()) {
                 if ring.0.len() < 4 {
                     continue;
@@ -219,6 +293,15 @@ pub fn build(data: &Path, out: &Path) -> Result<PathBuf> {
             if !ds.is_empty() {
                 maps.push_str(&svg_map(&view, card, &ds, &cty));
             }
+        }
+        if !view.omitted.is_empty() {
+            let n: usize = view.omitted.iter().map(|o| o.1).sum();
+            let who = view.omitted.iter().map(|o| district_label(&o.0)).collect::<Vec<_>>().join(", ");
+            let _ = write!(
+                maps,
+                r#"<p class="mapnote">Not shown: {n} small outlying island{} of {who}, too far from the rest of the state to fit at this scale. They are still scored.</p>"#,
+                if n == 1 { "" } else { "s" }
+            );
         }
         let section = format!(
             r#"<section class="state" id="st-{abbr}" data-st="{abbr}"><details><summary><span class="sname">{}</span><span class="ssum"></span></summary><div class="sbody"><div class="mapwrap">{maps}</div><div class="dtwrap"><table class="dt"></table></div></div></details></section>"#,
